@@ -1,0 +1,317 @@
+"""Assessment orchestrator: context -> metric adapters -> scored report.
+
+Prefetches shared data once (StreamCat row, NLCD landcover, HUC12), runs the
+registered metric adapters concurrently (each sync adapter on a worker thread),
+applies any user overrides, scores via the engine, and builds report rows for
+ALL 20 EASI metrics (implemented ones rated; the rest 'pending').
+"""
+from __future__ import annotations
+
+import asyncio
+from typing import Optional
+
+import anyio
+
+from . import basin, bieger, config, scoring
+from .datasources import nlcd, streamcat, threedep, wbd
+from .metrics import registry
+from .metrics.base import AnalysisContext, MetricResult, unavailable
+
+VALID = {"Good", "Fair", "Poor"}
+
+
+async def _to_thread(fn, *args):
+    return await anyio.to_thread.run_sync(fn, *args)
+
+
+async def assess(ctx: AnalysisContext, *,
+                 metric_ids: Optional[list[str]] = None,
+                 sources: Optional[dict[str, str]] = None,
+                 overrides: Optional[dict[str, str]] = None,
+                 progress: Optional[dict] = None) -> dict:
+    """Score the selected EASI metrics for ``ctx``.
+
+    ``metric_ids`` limits which functions are computed (default = all registered);
+    unselected ones appear as ``status="excluded"`` and drop out of the rollup.
+    ``sources`` maps metricId -> chosen data source for the few multi-source
+    metrics (see ``config.SOURCE_OPTIONS``). ``overrides`` force Good/Fair/Poor.
+    ``progress`` is an optional shared dict updated as adapters finish
+    (``{"done": int, "total": int}``) so the UI can show live "X/N" feedback.
+    """
+    overrides = {k: v for k, v in (overrides or {}).items() if v in VALID}
+    selected = set(metric_ids) if metric_ids is not None else set(registry.REGISTRY)
+    ctx.extras["source_choices"] = dict(sources or {})
+    if progress is not None:
+        progress["done"] = 0
+        progress["total"] = sum(1 for m in registry.REGISTRY if m in selected)
+
+    # Regional bankfull (Bieger 2015) for this location — the default geometry the
+    # cross-section, ER/BHR, and floodplain hydraulics build on (overrideable in UI).
+    bf = bieger.bankfull_geometry(ctx.drainage_area_sqkm, ctx.lat, ctx.lon)
+
+    # --- prefetch shared data concurrently (off the event loop) ---
+    sc, lc, huc12, geom = await asyncio.gather(
+        _to_thread(streamcat.metrics_by_comid, ctx.comid, registry.STREAMCAT_NAMES),
+        _to_thread(nlcd.watershed_landcover, ctx.watershed_geojson),
+        _to_thread(wbd.huc12_at_point, ctx.lat, ctx.lon),
+        _to_thread(lambda: threedep.reach_geomorphology(
+            ctx.reach_geojson, ctx.drainage_area_sqkm,
+            bankfull=(bf["width_m"], bf["depth_m"]), division=bf["division_name"])),
+    )
+    ctx.extras["streamcat"] = sc
+    ctx.extras["landcover"] = lc
+    ctx.huc12 = huc12
+    ctx.extras["reach_geomorph"] = geom
+
+    # Render the representative cross-section once per analysis (off the loop) and
+    # stash the geometry so the report can recompute ER/BHR from edited stages.
+    cross_section = await _to_thread(_build_cross_section, geom, ctx.slope)
+
+    # --- run only the SELECTED registered adapters, never failing the run ---
+    async def _run(mid: str, fn) -> MetricResult:
+        try:
+            return await _to_thread(fn, ctx)
+        except Exception as exc:  # noqa: BLE001
+            conf = config.METRIC_REGISTRY.get(mid, {}).get("confidence", "L")
+            return unavailable(mid, f"adapter error: {exc}", conf)
+        finally:
+            if progress is not None:  # advance the live "X/N" counter
+                progress["done"] = progress.get("done", 0) + 1
+
+    to_run = {m: f for m, f in registry.REGISTRY.items() if m in selected}
+    results = await asyncio.gather(*[_run(m, f) for m, f in to_run.items()])
+    by_id = {r.metric_id: r for r in results}
+
+    # --- build rows for all 20 metrics + collect ratings ---
+    meta_by_id = config.metrics_by_id()
+    reg = config.METRIC_REGISTRY
+    rows: list[dict] = []
+    for mid, meta in meta_by_id.items():
+        info = reg.get(mid, {})
+        res = by_id.get(mid)
+        if res is not None:
+            generated, source, value_text = res.rating, res.source, res.value_text
+            status, confidence, note = res.status, res.confidence, res.note
+        elif mid in registry.REGISTRY and mid not in selected:
+            generated, source, value_text = None, "", "not included in this analysis"
+            status, confidence = "excluded", info.get("confidence", "L")
+            note = "excluded from this analysis"
+        else:
+            generated, source, value_text = None, "", "not available"
+            status, confidence = "pending", info.get("confidence", "L")
+            note = "metric adapter not yet implemented"
+
+        rating = generated
+        if mid in overrides:  # user override wins
+            rating = overrides[mid]
+            status, source = "override", "user override"
+            value_text = f"user-provided: {rating}"
+            note = "overrides generated value"
+
+        idx = fscore = None
+        if rating in VALID:
+            idx = scoring.rating_to_index(rating, meta.get("indexMidpoints"))
+            fscore = scoring.function_score(idx)
+
+        rows.append({
+            "metricId": mid, "name": meta["name"], "discipline": meta["discipline"],
+            "functionId": meta["functionId"], "functionName": meta["functionName"],
+            "scale": info.get("scale"), "confidence": confidence,
+            "rating": rating, "generatedRating": generated,
+            "index": round(idx, 3) if idx is not None else None,
+            "functionScore": fscore, "valueText": value_text,
+            "criteria": meta.get("criteria", {}).get(rating, "") if rating in VALID else "",
+            "source": source, "status": status, "note": note,
+            "overrideable": bool(info.get("overrideable")),
+        })
+
+    result = _finalize(rows, len(meta_by_id), overrides)
+    if cross_section:
+        result["crossSection"] = cross_section
+    result["basin"] = basin.basin_characteristics(ctx)
+    return result
+
+
+def _xsection_caption(er=None, bhr=None, division=None, *, edited=False) -> str:
+    bits = []
+    if er is not None:
+        bits.append(f"entrenchment ratio {er}")
+    if bhr is not None:
+        bits.append(f"bank-height ratio {bhr}")
+    head = ", ".join(bits)
+    if edited:
+        return ("Edited cross-section" + (" — " + head if head else "")
+                + ". ER/BHR computed from your bankfull & floodplain heights; "
+                "flood-prone width is taken at 2× max bankfull depth (Rosgen).")
+    reg = f" — Bieger bankfull ({division})" if division else ""
+    return ("Representative 3DEP cross-section" + reg + (" — " + head if head else "")
+            + ". DEM screening estimate (10 m); edit the bankfull/floodplain heights below.")
+
+
+def _xsection_geom_block(geom: dict, slope) -> Optional[dict]:
+    """The minimal geometry the editable UI needs to recompute ER/BHR + redraw."""
+    profile = (geom or {}).get("profile")
+    d_bf, thalweg = geom.get("bankfull_depth_m"), geom.get("thalweg")
+    if not profile or thalweg is None or not d_bf:
+        return None
+    return {
+        "stations": list(profile["stations"]), "elevs": list(profile["elevs"]),
+        "thalweg": thalweg, "slope": slope,
+        "bankfull_stage": thalweg + d_bf,
+        # floodplain engages at/above bankfull — never below it (low measured banks +
+        # a regional bankfull estimate can otherwise put top-of-bank under bankfull),
+        # so the default bank-height ratio (engagement frequency) stays >= 1.
+        "floodplain_stage": max(geom.get("top_of_bank_m") or geom.get("fp_stage_m")
+                                or (thalweg + d_bf), thalweg + d_bf),
+        "bankfull_width_m": geom.get("bankfull_width_m"),
+        "bankfull_depth_m": geom.get("bankfull_depth_m"),
+        "division": geom.get("bankfull_division"),
+    }
+
+
+def _build_cross_section(geom: dict, slope=None, unit: str = "ft") -> Optional[dict]:
+    """Render the representative cross-section PNG (base64) + stash editable geom."""
+    block = _xsection_geom_block(geom, slope)
+    if block is None:
+        return None
+    try:
+        from . import xsplot
+        er, bhr = geom.get("entrenchment_ratio"), geom.get("bank_height_ratio")
+        png_b64 = xsplot.cross_section_png_b64(
+            block["stations"], block["elevs"], bankfull_stage=block["bankfull_stage"],
+            floodplain_stage=block["floodplain_stage"], thalweg=block["thalweg"],
+            entrenchment_ratio=er, bank_height_ratio=bhr,
+            bankfull_width_m=block["bankfull_width_m"],
+            bankfull_depth_m=block["bankfull_depth_m"],
+            division=block["division"], unit=unit)
+        return {"png_b64": png_b64, "geom": block,
+                "entrenchment_ratio": er, "bank_height_ratio": bhr,
+                "caption": _xsection_caption(er, bhr, block["division"])}
+    except Exception:  # noqa: BLE001 - resilience by design
+        return None
+
+
+def cross_section_from_stages(block: dict, bankfull_stage: float,
+                              floodplain_stage: float, *, unit: str = "ft",
+                              er=None, bhr=None, edited: bool = True) -> dict:
+    """Redraw the cross-section from chosen stages (metres).
+
+    With ``edited=True`` (default) ER/BHR are recomputed from the stages and the
+    measured profile. Passing ``er``/``bhr`` (with ``edited=False``) redraws with
+    the *original* ratios — used to switch units on the untouched default without
+    diverging from the metric table.
+    """
+    from . import geomorph, xsplot
+    st, el, thalweg = block["stations"], block["elevs"], block.get("thalweg")
+    if er is None or bhr is None:
+        d = geomorph.derive_from_stages(st, el, thalweg=thalweg,
+                                        bankfull_stage=bankfull_stage,
+                                        floodplain_stage=floodplain_stage)
+        er = d["entrenchment_ratio"] if er is None else er
+        bhr = d["bank_height_ratio"] if bhr is None else bhr
+        bf_w = d.get("bankfull_width_m") or block.get("bankfull_width_m")
+        bf_d = d.get("bankfull_depth_max_m")
+    else:
+        bf_w, bf_d = block.get("bankfull_width_m"), block.get("bankfull_depth_m")
+    png_b64 = xsplot.cross_section_png_b64(
+        st, el, bankfull_stage=bankfull_stage, floodplain_stage=floodplain_stage,
+        thalweg=thalweg, entrenchment_ratio=er, bank_height_ratio=bhr,
+        bankfull_width_m=bf_w, bankfull_depth_m=bf_d,
+        division=block.get("division"), unit=unit)
+    return {"png_b64": png_b64, "geom": block,
+            "entrenchment_ratio": er, "bank_height_ratio": bhr,
+            "caption": _xsection_caption(er, bhr, block.get("division"), edited=edited)}
+
+
+def rate_metrics_from_stages(block: dict, bankfull_stage: float,
+                             floodplain_stage: float) -> dict[str, dict]:
+    """Recompute the cross-section-derived metric ratings from user-chosen stages.
+
+    Returns ``{metricId: {"rating", "valueText"}}`` for the two metrics the editable
+    cross-section drives, each on its own axis: floodplain **access / entrenchment** from
+    the entrenchment ratio (lateral) and floodplain **engagement frequency** from the
+    bank-height ratio (vertical). They can differ. Reuses ``geomorph.derive_from_stages``
+    (the same ER/BHR shown in the cross-section caption); note ER depends on the bankfull
+    stage while BHR depends on the floodplain stage. The per-metric ``valueText`` keeps
+    the ER-vs-BHR distinction visible on edited rows.
+    """
+    from . import geomorph
+    from .metrics import hydraulics
+    out: dict[str, dict] = {}
+    d = geomorph.derive_from_stages(
+        block["stations"], block["elevs"], thalweg=block.get("thalweg"),
+        bankfull_stage=bankfull_stage, floodplain_stage=floodplain_stage)
+    er = d.get("entrenchment_ratio")
+    er_rating = hydraulics.rate_entrenchment(er)
+    if er_rating:
+        out[hydraulics.ENTRENCHMENT_ID] = {
+            "rating": er_rating,
+            "valueText": f"entrenchment ratio {er} — flood-prone width / bankfull "
+                         f"width (edited cross-section)"}
+    bhr = d.get("bank_height_ratio")
+    eng_rating, t_years = hydraulics.rate_engagement(bhr)
+    if eng_rating:
+        out[hydraulics.FLOODPLAIN_ENGAGEMENT_ID] = {
+            "rating": eng_rating,
+            "valueText": f"floodplain engaged by ~{t_years:.0f}-yr flow — bank-height "
+                         f"ratio {bhr} (edited cross-section)"}
+    return out
+
+
+def _finalize(rows: list[dict], total_count: int, overrides_applied) -> dict:
+    """Build the scored report dict (rollup) from finished metric rows."""
+    meta = config.metrics_by_id()
+    ratings = {r["metricId"]: r["rating"] for r in rows if r["rating"] in VALID}
+    function_scores = {
+        meta[mid]["functionId"]: scoring.function_score(
+            scoring.rating_to_index(rt, meta[mid].get("indexMidpoints")))
+        for mid, rt in ratings.items()
+    }
+    roll = scoring.rollup(function_scores)
+    return {
+        "metricRows": rows,
+        "functionScores": roll.function_scores,
+        "subIndices": {k: scoring.round2(v) for k, v in roll.sub_indices.items()},
+        "outcomes": {
+            k: {"direct": o.direct, "indirect": o.indirect,
+                "weighted": scoring.round2(o.weighted), "max": scoring.round2(o.max),
+                "subIndex": scoring.round2(o.sub_index)}
+            for k, o in roll.outcomes.items()
+        },
+        "ecosystemConditionIndex": scoring.round2(roll.ecosystem_condition_index),
+        "computedCount": len(ratings),
+        "totalCount": total_count,
+        "overridesApplied": sorted(overrides_applied),
+    }
+
+
+def rescore(base_report: dict, overrides: Optional[dict[str, str]]) -> dict:
+    """Re-apply user overrides to a base report and recompute the rollup.
+
+    Pure / synchronous (no network) — drives instant override updates in the UI.
+    ``base_report`` is the generated (overrides-free) report from ``assess``.
+    """
+    overrides = {k: v for k, v in (overrides or {}).items() if v in VALID}
+    meta = config.metrics_by_id()
+    rows: list[dict] = []
+    for base in base_report.get("metricRows", []):
+        mid = base["metricId"]
+        row = dict(base)
+        if mid in overrides:
+            rating = overrides[mid]
+            idx = scoring.rating_to_index(rating, meta[mid].get("indexMidpoints"))
+            row.update(rating=rating, status="override", source="user override",
+                       valueText=f"user-provided: {rating}", note="overrides generated value",
+                       index=round(idx, 3), functionScore=scoring.function_score(idx),
+                       criteria=meta[mid].get("criteria", {}).get(rating, ""))
+        else:
+            row["rating"] = base.get("generatedRating")
+        rows.append(row)
+    result = _finalize(rows, base_report.get("totalCount", len(meta)), overrides)
+    # The cross-section + basin characteristics depend only on geometry — carry
+    # them through unchanged so overrides never recompute them.
+    if base_report.get("crossSection"):
+        result["crossSection"] = base_report["crossSection"]
+    if base_report.get("basin"):
+        result["basin"] = base_report["basin"]
+    return result

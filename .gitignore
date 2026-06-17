@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# HyRiver / request caches
+cache/
+*.sqlite
+.hyriver_cache/
+
+# Local Claude Code tooling (not for publishing)
+.claude/
+
+# Internal implementation plans (not for publishing)
+plan.md
+docs/plan.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local secrets (never commit API keys)
+.env
