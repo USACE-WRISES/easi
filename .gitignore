@@ -14,9 +14,18 @@ cache/
 # Local Claude Code tooling (not for publishing)
 .claude/
 
+# Posit Publisher local deploy state (account-specific content IDs/URLs)
+.posit/
+
 # Internal implementation plans (not for publishing)
 plan.md
 docs/plan.md
+
+# Internal / confidential docs (in-review manuscripts, TN drafts) — never publish
+docs/ERDC-TN/
+
+# Dev-only one-off scripts (not for the public repo)
+scripts/revise_tn.py
 
 # OS / editor
 .DS_Store
