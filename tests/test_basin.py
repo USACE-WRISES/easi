@@ -14,9 +14,11 @@ def test_basin_characteristics_from_ctx():
     rows = basin.basin_characteristics(ctx)["rows"]
     labels = [r[0] for r in rows]
     for expected in ("Drainage area", "Channel slope", "Stream order", "Sinuosity",
-                     "Bankfull width × depth", "Entrenchment ratio", "Bank-height ratio",
                      "Mean annual air temp"):
         assert expected in labels
+    # bankfull/ER/BHR now live in the report's cross-section table, not here
+    for absent in ("Bankfull width × depth", "Entrenchment ratio", "Bank-height ratio"):
+        assert absent not in labels
     assert all(isinstance(r[1], str) for r in rows)   # JSON-safe strings
 
 

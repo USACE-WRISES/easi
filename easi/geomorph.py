@@ -62,6 +62,43 @@ def top_width(stations: list[float], elevs: list[float], stage: float):
     return T, merged
 
 
+def flow_width(stations: list[float], elevs: list[float], stage: float,
+               *, thalweg_index: Optional[int] = None) -> tuple[float, bool]:
+    """Contiguous top width spanning the thalweg at a water-surface ``stage``.
+
+    Rosgen edge-of-water to edge-of-water *across the channel*: from the thalweg,
+    walk outward each way to the first point that rises to/above ``stage``
+    (interpolating the exact crossing) and return ``right_edge - left_edge``.
+    Unlike :func:`top_width` (which sums every wetted segment across the whole
+    transect), this is the single water body containing the channel, so a
+    disconnected low pocket elsewhere is *not* counted and a dry bar *between* the
+    banks *is* (it is a width, not a wetted area). Returns ``(width_m,
+    edge_limited)``; ``edge_limited`` is True when a side never reaches the stage
+    within the sampled profile (DEM buffer too small). Width is 0 if ``stage`` is
+    at or below the thalweg.
+    """
+    n = len(stations)
+    if n < 2:
+        return 0.0, False
+    ti = thalweg_index if thalweg_index is not None else min(range(n), key=lambda i: elevs[i])
+    if elevs[ti] >= stage:
+        return 0.0, False
+
+    def edge(direction: int) -> tuple[float, bool]:
+        i = ti
+        while 0 <= i + direction < n:
+            j = i + direction
+            if elevs[j] >= stage:  # crossing between i (below) and j (>= stage)
+                t = (stage - elevs[i]) / (elevs[j] - elevs[i])
+                return stations[i] + t * (stations[j] - stations[i]), False
+            i = j
+        return stations[i], True  # reached the profile end without rising to stage
+
+    left, l_edge = edge(-1)
+    right, r_edge = edge(+1)
+    return max(right - left, 0.0), (l_edge or r_edge)
+
+
 def balanced_profile(stations: list[float], elevs: list[float], *,
                      min_half: float = 30.0
                      ) -> Optional[tuple[list[float], list[float]]]:
@@ -201,29 +238,33 @@ def derive_from_stages(stations: list[float], elevs: list[float], *,
     its metres datum); ``thalweg`` defaults to the profile minimum.
 
     - max bankfull depth ``d = bankfull_stage - thalweg``;
-    - bankfull width = top width at ``bankfull_stage`` (measured on the profile,
-      so ER is self-consistent rather than divided by a regional-curve width);
+    - bankfull width = contiguous top width at ``bankfull_stage`` (measured across
+      the channel on the profile, so ER is self-consistent);
     - flood-prone stage = ``thalweg + 2*d`` (Rosgen); flood-prone width measured
-      there; **ER = flood-prone width / bankfull width**;
-    - **BHR = (floodplain_stage - thalweg) / d** (1 = floodplain-connected, >1 incised).
+      there (edge-of-water to edge-of-water across the channel via
+      :func:`flow_width`); **ER = flood-prone width / bankfull width**;
+    - **BHR = (floodplain_stage - thalweg) / d** — ``floodplain_stage`` here is the
+      *low-bank* stage (the lower top-of-bank); 1 = floodplain-connected, >1 incised.
     """
     if thalweg is None:
         thalweg = min(elevs)
+    ti = min(range(len(elevs)), key=lambda i: elevs[i]) if elevs else 0
     d = float(bankfull_stage) - float(thalweg)
     out: dict = {"thalweg": thalweg, "bankfull_stage": bankfull_stage,
                  "floodplain_stage": floodplain_stage,
                  "bankfull_depth_max_m": round(d, 3) if d > 0 else None,
                  "entrenchment_ratio": None, "bank_height_ratio": None,
                  "bankfull_width_m": None, "flood_prone_width_m": None,
-                 "fp_stage_m": None}
+                 "fp_stage_m": None, "edge_limited": False}
     if d <= 0:
         return out
-    w_bf, _ = top_width(stations, elevs, bankfull_stage)
+    w_bf, _ = flow_width(stations, elevs, bankfull_stage, thalweg_index=ti)
     fp_stage = thalweg + 2.0 * d
-    w_fp, _ = top_width(stations, elevs, fp_stage)
+    w_fp, fp_edge = flow_width(stations, elevs, fp_stage, thalweg_index=ti)
     out["bankfull_width_m"] = round(w_bf, 1) if w_bf > 0 else None
     out["flood_prone_width_m"] = round(w_fp, 1) if w_fp > 0 else None
     out["fp_stage_m"] = round(fp_stage, 3)
+    out["edge_limited"] = bool(fp_edge)
     if w_bf > 0:
         out["entrenchment_ratio"] = round(w_fp / w_bf, 2)
     out["bank_height_ratio"] = round((float(floodplain_stage) - thalweg) / d, 2)
@@ -252,26 +293,33 @@ def reach_summary(transects: list[tuple[list[float], list[float]]],
                     "edge": te["edge_limited"] if te else None,
                     "bhr": bank_height_ratio(stations, elevs, d_bf)})
     ers = [p["er"] for p in per if p["er"] is not None]
-    bhrs = [p["bhr"] for p in per if p["bhr"] is not None]
     out: dict = {"bankfull_width_m": round(w_bf, 1), "bankfull_depth_m": round(d_bf, 2),
                  "n_transects": len(transects)}
     if division:
         out["bankfull_division"] = division
-    if ers:
-        out["entrenchment_ratio"] = round(median(ers), 2)
-        edge_flags = [p["edge"] for p in per if p["er"] is not None]
-        out["edge_limited"] = sum(edge_flags) > len(edge_flags) / 2
-    if bhrs:
-        out["bank_height_ratio"] = round(median(bhrs), 2)
 
+    # ER / BHR / widths are measured on the representative (plotted, editable)
+    # profile at the default stages — the single source of truth the report table
+    # and the metric ratings share. Low-bank stage = lower top-of-bank, clamped to
+    # bankfull (matches the editable default in assessment._xsection_geom_block).
     rep = _representative(per, ers)
     if rep is not None:
         stations, elevs = rep["stations"], rep["elevs"]
         thalweg = min(elevs)
+        tob = top_of_bank_elev(stations, elevs)
+        low_bank_stage = max(tob if tob is not None else thalweg + d_bf, thalweg + d_bf)
+        d = derive_from_stages(stations, elevs, thalweg=thalweg,
+                               bankfull_stage=thalweg + d_bf,
+                               floodplain_stage=low_bank_stage)
         out["profile"] = {"stations": list(stations), "elevs": list(elevs)}
         out["thalweg"] = thalweg
-        tob = top_of_bank_elev(stations, elevs)
         if tob is not None:
             out["top_of_bank_m"] = tob
         out["fp_stage_m"] = thalweg + 2.0 * d_bf
+        if d.get("bankfull_width_m"):
+            out["bankfull_width_m"] = d["bankfull_width_m"]
+        for k in ("flood_prone_width_m", "entrenchment_ratio", "bank_height_ratio"):
+            if d.get(k) is not None:
+                out[k] = d[k]
+        out["edge_limited"] = bool(d.get("edge_limited"))
     return out

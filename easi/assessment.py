@@ -133,19 +133,14 @@ async def assess(ctx: AnalysisContext, *,
 
 
 def _xsection_caption(er=None, bhr=None, division=None, *, edited=False) -> str:
-    bits = []
-    if er is not None:
-        bits.append(f"entrenchment ratio {er}")
-    if bhr is not None:
-        bits.append(f"bank-height ratio {bhr}")
-    head = ", ".join(bits)
+    # ER / BHR / widths now live in the summary table beside the plot, not here.
     if edited:
-        return ("Edited cross-section" + (" — " + head if head else "")
-                + ". ER/BHR computed from your bankfull & floodplain heights; "
-                "flood-prone width is taken at 2× max bankfull depth (Rosgen).")
+        return ("Edited cross-section. Flood-prone width is measured at 2x max "
+                "bankfull depth (Rosgen); the bank-height ratio uses your low-bank height.")
     reg = f" — Bieger bankfull ({division})" if division else ""
-    return ("Representative 3DEP cross-section" + reg + (" — " + head if head else "")
-            + ". DEM screening estimate (10 m); edit the bankfull/floodplain heights below.")
+    return ("Representative 3DEP cross-section" + reg
+            + ". DEM screening estimate (10 m); edit the bankfull and low-bank "
+            "heights in the table.")
 
 
 def _xsection_geom_block(geom: dict, slope) -> Optional[dict]:
@@ -165,6 +160,10 @@ def _xsection_geom_block(geom: dict, slope) -> Optional[dict]:
                                 or (thalweg + d_bf), thalweg + d_bf),
         "bankfull_width_m": geom.get("bankfull_width_m"),
         "bankfull_depth_m": geom.get("bankfull_depth_m"),
+        "flood_prone_width_m": geom.get("flood_prone_width_m"),
+        "entrenchment_ratio": geom.get("entrenchment_ratio"),
+        "bank_height_ratio": geom.get("bank_height_ratio"),
+        "edge_limited": geom.get("edge_limited"),
         "division": geom.get("bankfull_division"),
     }
 

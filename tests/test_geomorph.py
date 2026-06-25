@@ -32,6 +32,48 @@ def test_top_width_merges_islands():
     assert T > 0
 
 
+def test_flow_width_contiguous_simple_v():
+    # V channel, thalweg 0 at x=50, slope 0.5/unit -> at stage 2 the contiguous span is 8
+    stations = list(range(0, 101))
+    elevs = [abs(x - 50) * 0.5 for x in stations]
+    w, edge = geomorph.flow_width(stations, elevs, 2.0)
+    assert w == pytest.approx(8.0, abs=0.01) and edge is False
+
+
+def test_flow_width_excludes_disconnected_pocket():
+    # the channel (thalweg 0 at x=50) plus a separate low pocket at x=20, walled off by
+    # high ground at elev 5. The contiguous span across the thalweg must NOT count the
+    # pocket — unlike top_width, which sums every wetted segment.
+    stations = list(range(0, 101))
+    elevs = []
+    for x in stations:
+        if x == 20:
+            elevs.append(1.0)                      # disconnected pocket (below stage 3)
+        elif 40 <= x <= 60:
+            elevs.append(abs(x - 50) * 0.3)        # channel V, thalweg 0 at x=50
+        else:
+            elevs.append(5.0)                      # high ground walls the pocket off
+    w, edge = geomorph.flow_width(stations, elevs, 3.0)
+    t_sum, _ = geomorph.top_width(stations, elevs, 3.0)
+    assert w == pytest.approx(20.0, abs=0.5)       # channel only (40..60), pocket excluded
+    assert t_sum > w                               # summed top width also counts the pocket
+    assert edge is False
+
+
+def test_flow_width_zero_at_or_below_thalweg():
+    stations = list(range(0, 11))
+    elevs = [abs(x - 5) * 0.5 for x in stations]   # thalweg 0 at x=5
+    assert geomorph.flow_width(stations, elevs, 0.0) == (0.0, False)
+
+
+def test_flow_width_edge_limited_when_never_rises():
+    # stage above every sampled point -> both sides reach the profile end -> edge_limited
+    stations = list(range(0, 11))
+    elevs = [abs(x - 5) * 0.1 for x in stations]   # max 0.5 at the ends
+    w, edge = geomorph.flow_width(stations, elevs, 1.0)
+    assert edge is True and w == pytest.approx(10.0, abs=0.01)
+
+
 def test_entrenchment_connected_vs_incised():
     stations = list(range(0, 101))
     # connected: low banks (floodplain at 10), channel depth 4 (thalweg 6)
@@ -92,14 +134,21 @@ def test_derive_from_stages_bhr_and_depth():
 
 
 def test_derive_from_stages_er_rises_with_flood_prone_width():
+    # channel V 6->8 over [45,55] (bankfull depth 2 at thalweg 6); flood-prone stage = 10.
     stations = list(range(0, 101))
-    connected = [10.0 if not (40 <= x <= 60) else 6 + abs(x - 50) * 0.4 for x in stations]
-    incised = [14.0 if not (40 <= x <= 60) else 6 + abs(x - 50) * 0.8 for x in stations]
+
+    def chan(x):
+        return 6 + abs(x - 50) * 0.4 if 45 <= x <= 55 else None
+
+    # connected: low floodplain at 8.5 (below the flood-prone stage) -> wide flood-prone width;
+    # incised: terrace at 14 (above the flood-prone stage) hugging the channel -> narrow.
+    connected = [c if (c := chan(x)) is not None else 8.5 for x in stations]
+    incised = [c if (c := chan(x)) is not None else 14.0 for x in stations]
     er_c = geomorph.derive_from_stages(stations, connected, thalweg=6.0,
                                        bankfull_stage=8.0, floodplain_stage=8.0)["entrenchment_ratio"]
     er_i = geomorph.derive_from_stages(stations, incised, thalweg=6.0,
                                        bankfull_stage=8.0, floodplain_stage=8.0)["entrenchment_ratio"]
-    assert er_c > er_i           # connected spreads wide at the flood-prone stage
+    assert er_i < 1.4 < er_c     # entrenched (incised) vs broad accessible floodplain (connected)
 
 
 def test_derive_from_stages_invalid_bankfull_returns_none():
@@ -163,8 +212,29 @@ def test_reach_summary_injected_bankfull_overrides_national():
     elevs = [10.0 if not (40 <= x <= 60) else 6 + abs(x - 50) * 0.4 for x in stations]
     rs = geomorph.reach_summary([(stations, elevs)], 50.0,
                                 bankfull=(12.0, 1.5), division="Interior Plains")
-    assert rs["bankfull_width_m"] == 12.0 and rs["bankfull_depth_m"] == 1.5
+    # injected bankfull DEPTH (1.5) sets the curve; bankfull WIDTH is now measured on
+    # the section (edge-of-water at the bankfull stage), not the regional-curve width.
+    assert rs["bankfull_depth_m"] == 1.5
     assert rs["bankfull_division"] == "Interior Plains"
+    assert rs["bankfull_width_m"] is not None and rs["bankfull_width_m"] > 0
+
+
+def test_reach_summary_widths_match_representative_profile():
+    stations = list(range(0, 101))
+    elevs = [10.0 if not (40 <= x <= 60) else 6 + abs(x - 50) * 0.4 for x in stations]
+    rs = geomorph.reach_summary([(stations, elevs)], 50.0)
+    assert rs.get("flood_prone_width_m") and rs.get("bankfull_width_m")
+    # ER/BHR equal derive_from_stages on the representative profile at the same defaults
+    # (use the raw curve depth reach_summary used internally, not the rounded report value)
+    _, d_bf = geomorph.bankfull_geometry(50.0)
+    thal = rs["thalweg"]
+    low_bank = max(rs.get("top_of_bank_m") or thal + d_bf, thal + d_bf)
+    d = geomorph.derive_from_stages(rs["profile"]["stations"], rs["profile"]["elevs"],
+                                    thalweg=thal, bankfull_stage=thal + d_bf,
+                                    floodplain_stage=low_bank)
+    assert rs["entrenchment_ratio"] == d["entrenchment_ratio"]
+    assert rs["bank_height_ratio"] == d["bank_height_ratio"]
+    assert rs["flood_prone_width_m"] == d["flood_prone_width_m"]
 
 
 def test_reach_summary_retains_profile_and_stages():

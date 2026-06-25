@@ -73,23 +73,17 @@ def cross_section_png(stations, elevs, *, bankfull_stage: Optional[float] = None
             ax.axhline(bf_h, color="#1f6fc0", lw=1.1, zorder=4)
             ax.text(xs.max(), bf_h, " bankfull", color="#1f6fc0",
                     fontsize=8, va="center", ha="left")
-        if floodplain_stage is not None:
-            fp_h = (float(floodplain_stage) - thal) * u
-            ax.axhline(fp_h, color="#3a8a5c", lw=1.1, ls="--", zorder=4)
-            ax.text(xs.max(), fp_h, " floodplain", color="#3a8a5c",
+            # flood-prone stage = 2x bankfull depth (Rosgen): where the flood-prone
+            # width and entrenchment ratio are measured
+            fpr_h = 2.0 * bf_h
+            ax.axhline(fpr_h, color="#9a6b3f", lw=1.0, ls=":", zorder=4)
+            ax.text(xs.max(), fpr_h, " flood-prone", color="#9a6b3f",
                     fontsize=8, va="center", ha="left")
-
-        notes = []
-        if entrenchment_ratio is not None:
-            notes.append(f"ER {entrenchment_ratio}")
-        if bank_height_ratio is not None:
-            notes.append(f"BHR {bank_height_ratio}")
-        if bankfull_width_m is not None and bankfull_depth_m is not None:
-            notes.append(f"bankfull {bankfull_width_m * u:.1f}×{bankfull_depth_m * u:.2f} {ul}")
-        if notes:
-            ax.text(0.02, 0.06, "   ".join(notes), transform=ax.transAxes,
-                    fontsize=8, color="#333",
-                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="#d5deea", alpha=0.9))
+        if floodplain_stage is not None:  # the low-bank stage (drives the bank-height ratio)
+            lb_h = (float(floodplain_stage) - thal) * u
+            ax.axhline(lb_h, color="#3a8a5c", lw=1.1, ls="--", zorder=4)
+            ax.text(xs.max(), lb_h, " low bank", color="#3a8a5c",
+                    fontsize=8, va="center", ha="left")
 
         ax.set_xlabel(f"Station ({ul})", fontsize=9)
         ax.set_ylabel(f"Height above bed ({ul})", fontsize=9)

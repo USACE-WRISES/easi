@@ -186,6 +186,25 @@ def build_pdf(result: dict) -> bytes:
                            width=6.0 * inch, height=2.4 * inch))
         if xs.get("caption"):
             story.append(Paragraph(xs["caption"], styles["Italic"]))
+        geom = xs.get("geom") or {}
+        thal = geom.get("thalweg")
+        ft = 3.28084  # metres -> feet for the report
+
+        def _w(m):
+            return f"{m * ft:.1f} ft" if m is not None else "n/a"
+
+        def _h(stage):
+            return (f"{(stage - thal) * ft:.2f} ft"
+                    if stage is not None and thal is not None else "n/a")
+
+        er, bhr = xs.get("entrenchment_ratio"), xs.get("bank_height_ratio")
+        summary = (f"Bankfull width: {_w(geom.get('bankfull_width_m'))} &middot; "
+                   f"Flood-prone width: {_w(geom.get('flood_prone_width_m'))} &middot; "
+                   f"Entrenchment ratio: {er if er is not None else 'n/a'} &middot; "
+                   f"Bank-height ratio: {bhr if bhr is not None else 'n/a'} &middot; "
+                   f"Bankfull height: {_h(geom.get('bankfull_stage'))} &middot; "
+                   f"Low bank height: {_h(geom.get('floodplain_stage'))}")
+        story.append(Paragraph(summary, styles["Normal"]))
         story.append(Spacer(1, 8))
 
     metric_rows = _ordered_rows(rep)

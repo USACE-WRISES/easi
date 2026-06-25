@@ -109,7 +109,7 @@ def floodplain_access(ctx: AnalysisContext) -> MetricResult:
                if edge else ""))
     return MetricResult(ENTRENCHMENT_ID, value=er,
                         value_text=f"entrenchment ratio {er} — flood-prone width / "
-                                   f"bankfull width ({g.get('n_transects')} transects)",
+                                   f"bankfull width (representative cross-section)",
                         rating=rating, confidence="L" if edge else "M",
                         source="USGS 3DEP cross-sections (Rosgen entrenchment ratio)", note=note)
 

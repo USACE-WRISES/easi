@@ -23,7 +23,8 @@ os.environ.setdefault("HYRIVER_CACHE_EXPIRE", str(7 * 24 * 3600))
 import anyio  # noqa: E402
 from shiny import App, reactive, render, ui  # noqa: E402
 
-from easi import assessment, config, delineation, pipeline, report, scoring  # noqa: E402
+from easi import (assessment, config, delineation, geomorph, pipeline,  # noqa: E402
+                  report, scoring)
 from easi.datasources import flowlines  # noqa: E402
 from easi.datasources.geocode import geocode_address  # noqa: E402
 from easi.pipeline import DEFAULT_REACH_FT  # noqa: E402
@@ -126,7 +127,7 @@ def _metric_tip_html(name, definition, calc, note, crit, default):
 
 
 app_ui = ui.page_fillable(
-    ui.head_content(ui.tags.link(rel="stylesheet", href="styles.css"),
+    ui.head_content(ui.tags.link(rel="stylesheet", href="styles.css?v=2"),
                     ui.tags.script(src="geocode-autocomplete.js", defer=""),
                     ui.tags.script(src="tooltip.js", defer=""),
                     ui.tags.script(src="report-edit.js", defer="")),
@@ -342,16 +343,19 @@ def _basin_block(rep):
     if not rows:
         return None
     body = [ui.tags.tr(ui.tags.th(lbl), ui.tags.td(val)) for lbl, val in rows]
-    return ui.TagList(
-        ui.div("Basin characteristics", class_="easi-section-title"),
+    return ui.tags.details(
+        ui.tags.summary("Basin characteristics", class_="easi-section-title easi-rollup-sum"),
         ui.tags.table(ui.tags.tbody(*body), class_="easi-tbl", style="max-width:560px;"),
+        class_="easi-rollup", open=True,
     )
 
 
 def _xsection_section(rep):
-    """Editable cross-section: reactive image (output_ui 'xsection') + the
-    bankfull/floodplain height inputs, unit toggle, and reset. Heights default to
-    the Bieger regional bankfull and the DEM top-of-bank, in feet."""
+    """Cross-section block: a summary table + the editable bankfull/low-bank height
+    inputs (left) beside the plot (right). The table's computed values (bankfull &
+    flood-prone width, ER, BHR) recompute live from the inputs via ``xs_summary``;
+    heights are above the channel bottom, defaulting to the Bieger bankfull and the
+    DEM low bank, in feet."""
     xs = (rep or {}).get("crossSection") or {}
     if not xs.get("png_b64"):
         return None
@@ -366,28 +370,24 @@ def _xsection_section(rep):
         return round((stage - thalweg) * FT_PER_M, 2) if stage is not None else None
 
     bf_def = ft(block.get("bankfull_stage"))
-    fp_def = ft(block.get("floodplain_stage"))
-    return ui.div(
-        ui.output_ui("xsection"),
+    lb_def = ft(block.get("floodplain_stage"))
+    bf_tip = (f"Default {bf_def} ft — bankfull depth from the Bieger et al. (2015) regional "
+              f"hydraulic-geometry curve for the {block.get('division') or 'national'} "
+              f"physiographic division. Edit to use a surveyed value.")
+    panel = ui.div(
+        ui.div("Cross-section geometry", class_="easi-xs-panel-title"),
+        ui.output_ui("xs_summary"),
         ui.div(
-            ui.div("Edit channel geometry — heights above the channel bottom. "
-                   "ER, BHR, and the floodplain-engagement rating recompute.",
-                   class_="easi-xs-help"),
-            ui.input_radio_buttons("xs_unit", None, {"ft": "Feet", "m": "Meters"},
-                                   selected="ft", inline=True),
-            ui.div(
-                ui.input_numeric("xs_bankfull", "Bankfull height", value=bf_def,
-                                 min=0, step=0.1),
-                ui.input_numeric("xs_floodplain", "Floodplain height", value=fp_def,
-                                 min=0, step=0.1),
-                class_="easi-xs-fields",
-            ),
-            ui.input_action_button("xs_reset", "Reset to Bieger default",
-                                   class_="btn-sm btn-outline-secondary"),
-            class_="easi-xs-edit",
+            ui.input_numeric("xs_bankfull", ui.span("Bankfull height ", _info(text=bf_tip)),
+                             value=bf_def, min=0, step=0.1),
+            ui.input_numeric("xs_lowbank", "Low bank height", value=lb_def, min=0, step=0.1),
+            class_="easi-xs-fields",
         ),
-        class_="easi-xsection-wrap",
+        ui.input_radio_buttons("xs_unit", None, {"ft": "Feet", "m": "Meters"},
+                               selected="ft", inline=True),
+        class_="easi-xs-panel",
     )
+    return ui.div(panel, ui.output_ui("xsection"), class_="easi-xsection-wrap")
 
 
 def _dl_buttons():
@@ -408,8 +408,11 @@ def _report_modal(base):
         ui.output_ui("m_scores"),
         _basin_block(rep),
         _xsection_section(rep),
-        ui.div("Outcome rollup", class_="easi-section-title"),
-        ui.output_ui("m_outcomes"),
+        ui.tags.details(
+            ui.tags.summary("Outcome rollup", class_="easi-section-title easi-rollup-sum"),
+            ui.output_ui("m_outcomes"),
+            class_="easi-rollup",
+        ),
         ui.div("Metrics", class_="easi-section-title"),
         ui.div("Adjust a rating inline in the Rating column; click ✎ on any row to add a note. "
                "Edits flow into the report and exports.", class_="easi-instr"),
@@ -943,17 +946,16 @@ def server(input, output, session):
         if not block:
             return None
         try:
-            unit, bf_h, fp_h = input.xs_unit(), input.xs_bankfull(), input.xs_floodplain()
+            unit, bf_h, lb_h = input.xs_unit(), input.xs_bankfull(), input.xs_lowbank()
         except Exception:
             return None
-        if bf_h is None or fp_h is None:
+        if bf_h is None or lb_h is None:
             return None
-        f = FT_PER_M if unit == "m" else 1.0  # store inputs in unit; convert to metres
         per_m = FT_PER_M if unit == "ft" else 1.0
         thalweg = block["thalweg"]
         return {"block": block, "unit": unit,
                 "bankfull_stage": thalweg + float(bf_h) / per_m,
-                "floodplain_stage": thalweg + float(fp_h) / per_m}
+                "floodplain_stage": thalweg + float(lb_h) / per_m}  # low-bank stage (BHR)
 
     @reactive.calc
     def _geom_edited():
@@ -964,19 +966,19 @@ def server(input, output, session):
         if not block:
             return False
         try:
-            unit, bf_h, fp_h = input.xs_unit(), input.xs_bankfull(), input.xs_floodplain()
+            unit, bf_h, lb_h = input.xs_unit(), input.xs_bankfull(), input.xs_lowbank()
         except Exception:
             return False
-        if bf_h is None or fp_h is None:
+        if bf_h is None or lb_h is None:
             return False
         per_m = FT_PER_M if unit == "ft" else 1.0
         thal = block["thalweg"]
         bf_def = round((block["bankfull_stage"] - thal) * per_m, 2)
-        fp_def = round((block["floodplain_stage"] - thal) * per_m, 2)
-        return abs(float(bf_h) - bf_def) > 0.005 or abs(float(fp_h) - fp_def) > 0.005
+        lb_def = round((block["floodplain_stage"] - thal) * per_m, 2)
+        return abs(float(bf_h) - bf_def) > 0.005 or abs(float(lb_h) - lb_def) > 0.005
 
     @reactive.effect
-    @reactive.event(input.xs_bankfull, input.xs_floodplain)
+    @reactive.event(input.xs_bankfull, input.xs_lowbank)
     def _xs_rerate():
         """Geometry edits drive the cross-section metrics (floodplain access/entrenchment
         + engagement frequency); manual picks (via the dropdown) win until the next
@@ -1214,7 +1216,9 @@ def server(input, output, session):
         s = stage()
         running = (delineate_task.status() == "running") or (assess_task.status() == "running")
         if s and running:
-            return ui.div(ui.div(class_="easi-spinner"), ui.span(s), class_="easi-busy")
+            # text only — the spinner is a CSS ::before on the persistent #busy
+            # container so it spins continuously while this text re-renders ("3/20").
+            return ui.span(s)
         return None
 
     @render.ui
@@ -1301,6 +1305,45 @@ def server(input, output, session):
             class_="easi-xsection",
         )
 
+    @render.ui
+    def xs_summary():
+        """Computed cross-section metrics (left panel), recomputed live from the
+        current bankfull/low-bank heights so the table always matches the plot and
+        the floodplain metric ratings."""
+        block = _xs_block()
+        if not block:
+            return None
+        g = current_geometry()
+        unit = (g or {}).get("unit", "ft")
+        ul = "ft" if unit == "ft" else "m"
+        per_m = FT_PER_M if unit == "ft" else 1.0
+        if g:  # live values at the current (default or edited) stages
+            d = geomorph.derive_from_stages(
+                block["stations"], block["elevs"], thalweg=block["thalweg"],
+                bankfull_stage=g["bankfull_stage"], floodplain_stage=g["floodplain_stage"])
+        else:  # stored defaults
+            d = block
+        er, bhr = d.get("entrenchment_ratio"), d.get("bank_height_ratio")
+        bf_w, fp_w = d.get("bankfull_width_m"), d.get("flood_prone_width_m")
+        edge = d.get("edge_limited")
+
+        def wd(x):
+            return f"{x * per_m:.1f} {ul}" if x is not None else "n/a"
+
+        def rt(x):
+            return f"{x:.2f}" if x is not None else "n/a"
+
+        rows = [("Bankfull width", wd(bf_w)),
+                ("Flood-prone width", wd(fp_w) + (" †" if edge else "")),
+                ("Entrenchment ratio", rt(er)),
+                ("Bank-height ratio", rt(bhr))]
+        body = [ui.tags.tr(ui.tags.th(lbl), ui.tags.td(val)) for lbl, val in rows]
+        out = [ui.tags.table(ui.tags.tbody(*body), class_="easi-tbl easi-xs-tbl")]
+        if edge:
+            out.append(ui.p("† flood-prone reached the sampled edge; width is "
+                            "likely under-estimated.", class_="easi-xs-foot"))
+        return ui.TagList(*out)
+
     @reactive.effect
     @reactive.event(input.xs_unit)
     def _xs_convert_units():
@@ -1309,7 +1352,7 @@ def server(input, output, session):
             return
         factor = (1.0 / FT_PER_M) if (old == "ft" and new == "m") else (
             FT_PER_M if (old == "m" and new == "ft") else 1.0)
-        for fid in ("xs_bankfull", "xs_floodplain"):
+        for fid in ("xs_bankfull", "xs_lowbank"):
             try:
                 v = input[fid]()
             except Exception:
@@ -1317,19 +1360,6 @@ def server(input, output, session):
             if v is not None:
                 ui.update_numeric(fid, value=round(float(v) * factor, 2))
         _xs_unit_prev.set(new)
-
-    @reactive.effect
-    @reactive.event(input.xs_reset)
-    def _xs_reset_defaults():
-        block = _xs_block()
-        if not block:
-            return
-        thalweg = block["thalweg"]
-        per_m = FT_PER_M if input.xs_unit() == "ft" else 1.0
-        ui.update_numeric("xs_bankfull",
-                          value=round((block["bankfull_stage"] - thalweg) * per_m, 2))
-        ui.update_numeric("xs_floodplain",
-                          value=round((block["floodplain_stage"] - thalweg) * per_m, 2))
 
     @reactive.effect
     @reactive.event(input.show_report)
