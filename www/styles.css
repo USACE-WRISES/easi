@@ -138,7 +138,10 @@ h1, h2, h3, h4, h5, h6, .card-header { font-family: var(--font-head); }
 .outcome-card.chemical   .outcome-card-title { color: var(--chem-title); }
 .outcome-card.biological .outcome-card-title { color: var(--bio-title); }
 .outcome-card-value { font-family: var(--font-head); font-size: 1.5rem; font-weight: 700; line-height: 1.1; }
+.outcome-card-cat { display: inline-block; margin-top: 0.25rem; padding: 1px 9px; border-radius: 10px;
+  font-size: 0.76rem; font-weight: 700; color: #2a3550; }
 .outcome-card-sub { font-size: 0.76rem; color: #667; margin-top: 0.15rem; }
+.easi-scale-note { font-size: 11.5px; color: #667; margin: 0.55rem 0 0; line-height: 1.35; }
 
 .ecosystem-condition-card {
   margin: 0.5rem 0 0; border-top: 3px solid;
@@ -177,6 +180,21 @@ h1, h2, h3, h4, h5, h6, .card-header { font-family: var(--font-head); }
 .easi-xs-panel .form-control { padding: 3px 8px; height: auto; }
 .easi-xs-panel .shiny-options-group { font-size: 12px; }
 .easi-xs-panel .btn { margin-top: 2px; align-self: flex-start; }
+
+/* candidate cross-section selector — overlay at the top-right of the plot */
+.easi-xs-right { position: relative; min-width: 0; }
+.easi-xs-switch {
+  position: absolute; top: 6px; right: 8px; z-index: 5;
+  display: flex; align-items: center; gap: 2px;
+  background: rgba(255, 255, 255, .9); border: 1px solid var(--card-border);
+  border-radius: 7px; padding: 1px 3px; box-shadow: 0 1px 3px rgba(16, 24, 40, .08);
+}
+.easi-xs-arrow {
+  border: none; background: transparent; cursor: pointer;
+  padding: 0 5px; font-size: 12px; line-height: 1.4; color: var(--easi-accent);
+}
+.easi-xs-arrow:hover { color: var(--eci-title); }
+.easi-xs-switch-lbl { font-size: 11px; color: #33415c; min-width: 92px; text-align: center; }
 
 @media (max-width: 640px) {
   .easi-xsection-wrap { grid-template-columns: 1fr; }
@@ -400,18 +418,25 @@ details[open] > summary.easi-cfg-group::before { transform: rotate(90deg); }
   padding: 5px 14px 5px 11px; font-size: 12px; font-weight: 500; color: var(--easi-accent);
 }
 
-/* busy/stage indicator — the spinner is a pseudo-element of the PERSISTENT #busy
-   output container, so it keeps spinning smoothly while the "3/20" progress text
-   re-renders (a child <div> spinner would restart its animation on every update). */
-#busy:not(:empty) {
+/* busy/stage indicator — a TEXT output (#busy_text) updated in place; the spinner is
+   a ::before on this persistent element so it spins smoothly. It collapses to nothing
+   when idle (:empty). */
+#busy_text:not(:empty) {
   display: flex; align-items: center; gap: 8px;
   color: var(--easi-accent); font-size: 13px; margin-top: 10px;
 }
-#busy:not(:empty)::before {
+#busy_text:not(:empty)::before {
   content: ""; width: 15px; height: 15px; flex: none;
   border: 2px solid #cdd8ec; border-top-color: var(--easi-accent);
   border-radius: 50%; animation: easi-spin .8s linear infinite;
 }
+/* Suppress Shiny's automatic "recalculating" spinner overlay on this output. Shiny
+   stamps every output with .recalculating while it recomputes, which adds min-height:
+   32px + a 32px ::after spinner + opacity:0.3. The progress label recomputes ~3x/s, so
+   that overlay flickered the row height (the jitter) and dimmed it. We have our own
+   spinner, so neutralize Shiny's here only. */
+#busy_text.recalculating { min-height: 0 !important; opacity: 1 !important; }
+#busy_text.recalculating::after { display: none !important; }
 .easi-spinner {
   width: 15px; height: 15px; border: 2px solid #cdd8ec; border-top-color: var(--easi-accent);
   border-radius: 50%; animation: easi-spin .8s linear infinite; flex: none;

@@ -218,6 +218,55 @@ def test_floodplain_height_moves_engagement_not_connectivity():
     assert order[high[fp]["rating"]] <= order[low[fp]["rating"]]  # engagement worsens
 
 
+def test_rate_channel_evolution_bins():
+    assert geomorphology.rate_channel_evolution(1.1) == "Good"
+    assert geomorphology.rate_channel_evolution(1.5) == "Fair"
+    assert geomorphology.rate_channel_evolution(2.0) == "Poor"
+    assert geomorphology.rate_channel_evolution(None) is None
+
+
+def test_rate_metrics_from_stages_includes_channel_evolution():
+    # editing the low-bank height re-rates channel evolution from the same BHR
+    from easi import assessment
+    st = list(range(-60, 61, 5))
+    elevs = [min(4.0, abs(x) * 0.5) for x in st]      # deep V; banks reach 4 m
+    block = {"stations": st, "elevs": elevs, "thalweg": 0.0, "slope": 0.004,
+             "bankfull_stage": 1.0, "floodplain_stage": 1.0}
+    ce = geomorphology.CHANNEL_EVOL_ID
+    low = assessment.rate_metrics_from_stages(block, 1.0, 1.2)   # BHR 1.2 -> stable
+    high = assessment.rate_metrics_from_stages(block, 1.0, 3.5)  # BHR 3.5 -> incised
+    assert low[ce]["rating"] == "Good" and high[ce]["rating"] == "Poor"
+    assert "bank-height ratio" in high[ce]["valueText"]
+
+
+def test_rate_metrics_from_stages_channelized_keeps_default_channel_evolution():
+    # a canal/ditch stays Poor regardless of geometry edits, so it is not re-rated here
+    from easi import assessment
+    st = list(range(-60, 61, 5))
+    elevs = [min(4.0, abs(x) * 0.5) for x in st]
+    block = {"stations": st, "elevs": elevs, "thalweg": 0.0, "slope": 0.004,
+             "bankfull_stage": 1.0, "floodplain_stage": 1.0, "fcode": 33600}  # canal
+    out = assessment.rate_metrics_from_stages(block, 1.0, 1.0)
+    assert geomorphology.CHANNEL_EVOL_ID not in out
+    assert hydraulics.FLOODPLAIN_ENGAGEMENT_ID in out   # floodplain metrics still recompute
+
+
+def test_build_cross_section_three_candidates():
+    # crossSection stores one editable block per candidate, with the middle selected
+    from easi import assessment
+    st = list(range(0, 101))
+    el = [10.0 if not (40 <= x <= 60) else 6 + abs(x - 50) * 0.4 for x in st]
+    base = geomorph.summarize_profile(st, el, 50.0, division="Interior Plains")
+    cands = []
+    for lab in ("Upstream", "Middle", "Downstream"):
+        c = dict(base); c["label"] = lab; cands.append(c)
+    geom = dict(base); geom["candidates"] = cands; geom["selected"] = 1
+    cs = assessment._build_cross_section(geom, slope=0.004, fcode=None)
+    assert cs and len(cs["candidates"]) == 3 and cs["selected"] == 1
+    assert [b["label"] for b in cs["candidates"]] == ["Upstream", "Middle", "Downstream"]
+    assert cs["geom"]["label"] == "Middle" and cs["geom"]["fcode"] is None
+
+
 # --- biological integrity (modeled surrogate) ------------------------------ #
 def test_biological_integrity_spread():
     good = biology.biological_integrity(_ctx(streamcat={

@@ -65,7 +65,7 @@ async def assess(ctx: AnalysisContext, *,
 
     # Render the representative cross-section once per analysis (off the loop) and
     # stash the geometry so the report can recompute ER/BHR from edited stages.
-    cross_section = await _to_thread(_build_cross_section, geom, ctx.slope)
+    cross_section = await _to_thread(_build_cross_section, geom, ctx.slope, ctx.fcode)
 
     # --- run only the SELECTED registered adapters, never failing the run ---
     async def _run(mid: str, fn) -> MetricResult:
@@ -135,7 +135,7 @@ async def assess(ctx: AnalysisContext, *,
 def _xsection_caption(er=None, bhr=None, division=None, *, edited=False) -> str:
     # ER / BHR / widths now live in the summary table beside the plot, not here.
     if edited:
-        return ("Edited cross-section. Flood-prone width is measured at 2x max "
+        return ("Edited cross-section. Floodprone width is measured at 2x max "
                 "bankfull depth (Rosgen); the bank-height ratio uses your low-bank height.")
     reg = f" — Bieger bankfull ({division})" if division else ""
     return ("Representative 3DEP cross-section" + reg
@@ -143,7 +143,7 @@ def _xsection_caption(er=None, bhr=None, division=None, *, edited=False) -> str:
             "heights in the table.")
 
 
-def _xsection_geom_block(geom: dict, slope) -> Optional[dict]:
+def _xsection_geom_block(geom: dict, slope, fcode=None) -> Optional[dict]:
     """The minimal geometry the editable UI needs to recompute ER/BHR + redraw."""
     profile = (geom or {}).get("profile")
     d_bf, thalweg = geom.get("bankfull_depth_m"), geom.get("thalweg")
@@ -165,17 +165,28 @@ def _xsection_geom_block(geom: dict, slope) -> Optional[dict]:
         "bank_height_ratio": geom.get("bank_height_ratio"),
         "edge_limited": geom.get("edge_limited"),
         "division": geom.get("bankfull_division"),
+        "fcode": fcode,
     }
 
 
-def _build_cross_section(geom: dict, slope=None, unit: str = "ft") -> Optional[dict]:
-    """Render the representative cross-section PNG (base64) + stash editable geom."""
-    block = _xsection_geom_block(geom, slope)
-    if block is None:
+def _build_cross_section(geom: dict, slope=None, fcode=None, unit: str = "ft") -> Optional[dict]:
+    """Stash an editable geometry block for every candidate transect (upstream /
+    middle / downstream) and render the selected one's PNG (others render on demand
+    when switched in the report)."""
+    cand_geoms = geom.get("candidates") or [geom]
+    blocks = []
+    for c in cand_geoms:
+        b = _xsection_geom_block(c, slope, fcode)
+        if b is not None:
+            b["label"] = c.get("label")
+            blocks.append(b)
+    if not blocks:
         return None
+    sel = min(max(int(geom.get("selected", len(blocks) // 2)), 0), len(blocks) - 1)
     try:
         from . import xsplot
-        er, bhr = geom.get("entrenchment_ratio"), geom.get("bank_height_ratio")
+        block = blocks[sel]
+        er, bhr = block.get("entrenchment_ratio"), block.get("bank_height_ratio")
         png_b64 = xsplot.cross_section_png_b64(
             block["stations"], block["elevs"], bankfull_stage=block["bankfull_stage"],
             floodplain_stage=block["floodplain_stage"], thalweg=block["thalweg"],
@@ -183,7 +194,7 @@ def _build_cross_section(geom: dict, slope=None, unit: str = "ft") -> Optional[d
             bankfull_width_m=block["bankfull_width_m"],
             bankfull_depth_m=block["bankfull_depth_m"],
             division=block["division"], unit=unit)
-        return {"png_b64": png_b64, "geom": block,
+        return {"png_b64": png_b64, "geom": block, "candidates": blocks, "selected": sel,
                 "entrenchment_ratio": er, "bank_height_ratio": bhr,
                 "caption": _xsection_caption(er, bhr, block["division"])}
     except Exception:  # noqa: BLE001 - resilience by design
@@ -235,7 +246,7 @@ def rate_metrics_from_stages(block: dict, bankfull_stage: float,
     the ER-vs-BHR distinction visible on edited rows.
     """
     from . import geomorph
-    from .metrics import hydraulics
+    from .metrics import geomorphology, hydraulics
     out: dict[str, dict] = {}
     d = geomorph.derive_from_stages(
         block["stations"], block["elevs"], thalweg=block.get("thalweg"),
@@ -245,7 +256,7 @@ def rate_metrics_from_stages(block: dict, bankfull_stage: float,
     if er_rating:
         out[hydraulics.ENTRENCHMENT_ID] = {
             "rating": er_rating,
-            "valueText": f"entrenchment ratio {er} — flood-prone width / bankfull "
+            "valueText": f"entrenchment ratio {er} — floodprone width / bankfull "
                          f"width (edited cross-section)"}
     bhr = d.get("bank_height_ratio")
     eng_rating, t_years = hydraulics.rate_engagement(bhr)
@@ -254,6 +265,14 @@ def rate_metrics_from_stages(block: dict, bankfull_stage: float,
             "rating": eng_rating,
             "valueText": f"floodplain engaged by ~{t_years:.0f}-yr flow — bank-height "
                          f"ratio {bhr} (edited cross-section)"}
+    # channel-evolution stage shares this BHR; re-rate it too, but a channelized
+    # reach (canal/ditch) stays Poor regardless of geometry edits.
+    if block.get("fcode") not in geomorphology.CHANNELIZED_FCODES:
+        ce_rating = geomorphology.rate_channel_evolution(bhr)
+        if ce_rating:
+            out[geomorphology.CHANNEL_EVOL_ID] = {
+                "rating": ce_rating,
+                "valueText": f"bank-height ratio {bhr} (edited cross-section)"}
     return out
 
 

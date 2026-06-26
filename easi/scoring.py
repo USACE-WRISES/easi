@@ -114,6 +114,14 @@ def index_band_color(value: float) -> str:
     return config.INDEX_BANDS[-1][1]
 
 
+def index_band_label(value: float) -> str:
+    """Index (0-1) -> STAF condition category (Poor/Fair/Good), matching the color bands."""
+    for (threshold, _color), label in zip(config.INDEX_BANDS, config.INDEX_BAND_LABELS):
+        if value <= threshold:
+            return label
+    return config.INDEX_BAND_LABELS[-1]
+
+
 def function_score_band_color(value: float) -> str:
     for threshold, color in config.FUNCTION_SCORE_BANDS:
         if value <= threshold:

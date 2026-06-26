@@ -237,6 +237,22 @@ def test_reach_summary_widths_match_representative_profile():
     assert rs["flood_prone_width_m"] == d["flood_prone_width_m"]
 
 
+def test_summarize_profile_matches_derive_from_stages():
+    stations = list(range(0, 101))
+    elevs = [10.0 if not (40 <= x <= 60) else 6 + abs(x - 50) * 0.4 for x in stations]
+    s = geomorph.summarize_profile(stations, elevs, 50.0, division="Interior Plains")
+    assert s["profile"]["stations"] == stations
+    assert s["thalweg"] == pytest.approx(6.0, abs=1e-6)
+    assert s["bankfull_division"] == "Interior Plains"
+    _, d_bf = geomorph.bankfull_geometry(50.0)
+    low_bank = max(s.get("top_of_bank_m") or s["thalweg"] + d_bf, s["thalweg"] + d_bf)
+    d = geomorph.derive_from_stages(stations, elevs, thalweg=s["thalweg"],
+                                    bankfull_stage=s["thalweg"] + d_bf, floodplain_stage=low_bank)
+    assert s["entrenchment_ratio"] == d["entrenchment_ratio"]
+    assert s["bank_height_ratio"] == d["bank_height_ratio"]
+    assert s["flood_prone_width_m"] == d["flood_prone_width_m"]
+
+
 def test_reach_summary_retains_profile_and_stages():
     stations = list(range(0, 101))
     elevs = [10.0 if not (40 <= x <= 60) else 6 + abs(x - 50) * 0.4 for x in stations]

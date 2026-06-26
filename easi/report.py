@@ -11,7 +11,7 @@ import csv
 import io
 import json
 
-from .scoring import index_band_color
+from .scoring import index_band_color, index_band_label
 
 RATING_COLOR = {"Good": "#c8d9f2", "Fair": "#f5e7a6", "Poor": "#f5b5b5"}
 _DISCIPLINE_ORDER = ["Hydrology", "Hydraulics", "Geomorphology",
@@ -127,13 +127,14 @@ def _condition_png(rep: dict) -> bytes:
     labels = ["Ecosystem", "Physical", "Chemical", "Biological"]
     vals = [rep.get("ecosystemConditionIndex") or 0, sub["physical"],
             sub["chemical"], sub["biological"]]
+    ylabels = [f"{lab} — {index_band_label(v)}" for lab, v in zip(labels, vals)]
     colors = [index_band_color(v) for v in vals]
     fig, ax = plt.subplots(figsize=(6.5, 1.9))
-    ax.barh(labels[::-1], vals[::-1], color=colors[::-1], edgecolor="#888")
+    ax.barh(ylabels[::-1], vals[::-1], color=colors[::-1], edgecolor="#888")
     ax.set_xlim(0, 1)
     for i, v in enumerate(vals[::-1]):
         ax.text(min(v + 0.02, 0.95), i, f"{v:.2f}", va="center", fontsize=9)
-    ax.set_xlabel("Index (0–1)")
+    ax.set_xlabel("Condition index (0–1): Poor · Fair · Good bands")
     fig.tight_layout()
     out = io.BytesIO()
     fig.savefig(out, format="png", dpi=130)
@@ -199,7 +200,7 @@ def build_pdf(result: dict) -> bytes:
 
         er, bhr = xs.get("entrenchment_ratio"), xs.get("bank_height_ratio")
         summary = (f"Bankfull width: {_w(geom.get('bankfull_width_m'))} &middot; "
-                   f"Flood-prone width: {_w(geom.get('flood_prone_width_m'))} &middot; "
+                   f"Floodprone width: {_w(geom.get('flood_prone_width_m'))} &middot; "
                    f"Entrenchment ratio: {er if er is not None else 'n/a'} &middot; "
                    f"Bank-height ratio: {bhr if bhr is not None else 'n/a'} &middot; "
                    f"Bankfull height: {_h(geom.get('bankfull_stage'))} &middot; "

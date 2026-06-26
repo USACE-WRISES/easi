@@ -77,7 +77,7 @@ def cross_section_png(stations, elevs, *, bankfull_stage: Optional[float] = None
             # width and entrenchment ratio are measured
             fpr_h = 2.0 * bf_h
             ax.axhline(fpr_h, color="#9a6b3f", lw=1.0, ls=":", zorder=4)
-            ax.text(xs.max(), fpr_h, " flood-prone", color="#9a6b3f",
+            ax.text(xs.max(), fpr_h, " floodprone", color="#9a6b3f",
                     fontsize=8, va="center", ha="left")
         if floodplain_stage is not None:  # the low-bank stage (drives the bank-height ratio)
             lb_h = (float(floodplain_stage) - thal) * u

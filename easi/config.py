@@ -28,6 +28,7 @@ FUNCTION_SCORE_MAX = 15
 
 # Color bands (hex mirrors STAF). Index bands (0-1) and function-score bands (0-15).
 INDEX_BANDS = [(0.39, "#f5b5b5"), (0.69, "#f5e7a6"), (1.01, "#c8d9f2")]
+INDEX_BAND_LABELS = ("Poor", "Fair", "Good")  # condition category per band (aligned with INDEX_BANDS)
 FUNCTION_SCORE_BANDS = [(5, "#f5b5b5"), (10, "#f5e7a6"), (FUNCTION_SCORE_MAX, "#c8d9f2")]
 
 # Data-confidence levels for the report badges
@@ -171,7 +172,7 @@ METRIC_DEFINITIONS: dict[str, str] = {
         "overbank flooding).",
     "floodplain-connectivity-floodplain-access-entrenchment":
         "Whether the channel has lateral access to a floodplain, via the entrenchment ratio "
-        "(flood-prone width ÷ bankfull width).",
+        "(floodprone width ÷ bankfull width).",
     "hyporheic-connectivity-hyporheic-exchange-indicators":
         "Potential for surface water to exchange with the shallow subsurface (hyporheic zone), "
         "inferred from channel slope and sinuosity.",

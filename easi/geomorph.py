@@ -271,55 +271,60 @@ def derive_from_stages(stations: list[float], elevs: list[float], *,
     return out
 
 
+def summarize_profile(stations: list[float], elevs: list[float], da_sqkm: float, *,
+                      bankfull: Optional[tuple[float, float]] = None,
+                      division: Optional[str] = None) -> dict:
+    """Rosgen summary for one station-elevation profile at its default stages.
+
+    Bankfull depth from the regional curve (``bankfull`` (width, depth) or the
+    national ``bankfull_geometry``); bankfull stage = thalweg + depth; low-bank stage
+    = the lower top-of-bank, clamped to bankfull. ER/BHR/widths are measured on this
+    profile (the editable cross-section + metrics share these). Returns the profile
+    plus the keys the editable geometry block consumes.
+    """
+    w_bf, d_bf = bankfull if bankfull is not None else bankfull_geometry(da_sqkm)
+    thalweg = min(elevs)
+    tob = top_of_bank_elev(stations, elevs)
+    low_bank_stage = max(tob if tob is not None else thalweg + d_bf, thalweg + d_bf)
+    d = derive_from_stages(stations, elevs, thalweg=thalweg,
+                           bankfull_stage=thalweg + d_bf, floodplain_stage=low_bank_stage)
+    out: dict = {"profile": {"stations": list(stations), "elevs": list(elevs)},
+                 "thalweg": thalweg, "fp_stage_m": thalweg + 2.0 * d_bf,
+                 "bankfull_width_m": d.get("bankfull_width_m") or round(w_bf, 1),
+                 "bankfull_depth_m": round(d_bf, 2),
+                 "flood_prone_width_m": d.get("flood_prone_width_m"),
+                 "entrenchment_ratio": d.get("entrenchment_ratio"),
+                 "bank_height_ratio": d.get("bank_height_ratio"),
+                 "edge_limited": bool(d.get("edge_limited"))}
+    if tob is not None:
+        out["top_of_bank_m"] = tob
+    if division:
+        out["bankfull_division"] = division
+    return out
+
+
 def reach_summary(transects: list[tuple[list[float], list[float]]],
                   da_sqkm: float, *,
                   bankfull: Optional[tuple[float, float]] = None,
                   division: Optional[str] = None) -> dict:
-    """Aggregate per-transect entrenchment + bank-height ratio over a reach.
+    """Per-reach summary on the *representative* transect (median entrenchment ratio).
 
-    ``bankfull`` is an optional precomputed ``(width_m, depth_m)`` — the caller
-    injects the regional (Bieger) estimate for the analysis location; when None,
-    the national curve (``bankfull_geometry``) is used. Also retains a single
-    *representative* station-elevation profile (the median-ER transect) plus the
-    thalweg, top-of-bank, and flood-prone stage, so the floodplain-engagement
-    hydraulics and the cross-section plot can reuse it without re-fetching the DEM.
+    ``bankfull`` is an optional precomputed ``(width_m, depth_m)`` — the caller injects
+    the regional (Bieger) estimate; when None the national curve is used. ER/BHR/widths
+    and the retained profile come from :func:`summarize_profile` on the representative
+    transect, so the editable cross-section and the metrics share the same values.
     """
     w_bf, d_bf = bankfull if bankfull is not None else bankfull_geometry(da_sqkm)
-    per: list[dict] = []
-    for stations, elevs in transects:
-        te = transect_entrenchment(stations, elevs, d_bf, w_bf)
-        per.append({"stations": stations, "elevs": elevs,
-                    "er": te["er"] if te else None,
-                    "edge": te["edge_limited"] if te else None,
-                    "bhr": bank_height_ratio(stations, elevs, d_bf)})
+    per = [{"stations": s, "elevs": e,
+            "er": (te["er"] if (te := transect_entrenchment(s, e, d_bf, w_bf)) else None)}
+           for s, e in transects]
     ers = [p["er"] for p in per if p["er"] is not None]
     out: dict = {"bankfull_width_m": round(w_bf, 1), "bankfull_depth_m": round(d_bf, 2),
                  "n_transects": len(transects)}
     if division:
         out["bankfull_division"] = division
-
-    # ER / BHR / widths are measured on the representative (plotted, editable)
-    # profile at the default stages — the single source of truth the report table
-    # and the metric ratings share. Low-bank stage = lower top-of-bank, clamped to
-    # bankfull (matches the editable default in assessment._xsection_geom_block).
     rep = _representative(per, ers)
     if rep is not None:
-        stations, elevs = rep["stations"], rep["elevs"]
-        thalweg = min(elevs)
-        tob = top_of_bank_elev(stations, elevs)
-        low_bank_stage = max(tob if tob is not None else thalweg + d_bf, thalweg + d_bf)
-        d = derive_from_stages(stations, elevs, thalweg=thalweg,
-                               bankfull_stage=thalweg + d_bf,
-                               floodplain_stage=low_bank_stage)
-        out["profile"] = {"stations": list(stations), "elevs": list(elevs)}
-        out["thalweg"] = thalweg
-        if tob is not None:
-            out["top_of_bank_m"] = tob
-        out["fp_stage_m"] = thalweg + 2.0 * d_bf
-        if d.get("bankfull_width_m"):
-            out["bankfull_width_m"] = d["bankfull_width_m"]
-        for k in ("flood_prone_width_m", "entrenchment_ratio", "bank_height_ratio"):
-            if d.get(k) is not None:
-                out[k] = d[k]
-        out["edge_limited"] = bool(d.get("edge_limited"))
+        out.update(summarize_profile(rep["stations"], rep["elevs"], da_sqkm,
+                                     bankfull=bankfull, division=division))
     return out

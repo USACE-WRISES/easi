@@ -105,10 +105,10 @@ def floodplain_access(ctx: AnalysisContext) -> MetricResult:
     rating = rate_entrenchment(er)
     edge = bool(g.get("edge_limited"))
     note = ("DEM 10 m; bankfull from national curve; override via xs-calc"
-            + (" — flood-prone reached buffer edge (ER likely under-estimated)"
+            + (" — floodprone reached buffer edge (ER likely under-estimated)"
                if edge else ""))
     return MetricResult(ENTRENCHMENT_ID, value=er,
-                        value_text=f"entrenchment ratio {er} — flood-prone width / "
+                        value_text=f"entrenchment ratio {er} — floodprone width / "
                                    f"bankfull width (representative cross-section)",
                         rating=rating, confidence="L" if edge else "M",
                         source="USGS 3DEP cross-sections (Rosgen entrenchment ratio)", note=note)

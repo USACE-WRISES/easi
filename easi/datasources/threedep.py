@@ -44,29 +44,46 @@ def reach_geomorphology(reach_geojson: dict | None, da_sqkm: float,
         dem = py3dep.get_dem(buf4326, resolution=10).rio.reproject(5070)
 
         n_pts = int(2 * wide / spacing) + 1
-        transects: list[tuple[list[float], list[float]]] = []
-        for s in np.linspace(line.length * 0.15, line.length * 0.85, n_transects):
+        usable: list[tuple[float, list[float], list[float]]] = []  # (pos_frac, stations, elevs)
+        for frac in np.linspace(0.15, 0.85, n_transects):
+            s = line.length * float(frac)
             p = line.interpolate(s)
             p2 = line.interpolate(min(s + 5.0, line.length))
             dx, dy = p2.x - p.x, p2.y - p.y
             norm = (dx * dx + dy * dy) ** 0.5 or 1.0
             nx, ny = -dy / norm, dx / norm  # unit perpendicular
             ts = np.linspace(-wide, wide, n_pts)
-            zx = p.x + nx * ts
-            zy = p.y + ny * ts
-            z = dem.interp(x=xr.DataArray(zx, dims="t"),
-                           y=xr.DataArray(zy, dims="t")).values
+            z = dem.interp(x=xr.DataArray(p.x + nx * ts, dims="t"),
+                           y=xr.DataArray(p.y + ny * ts, dims="t")).values
             z = np.asarray(z, dtype=float)
             ok = np.isfinite(z)
             if ok.sum() < 7:
                 continue
             bal = geomorph.balanced_profile(ts[ok].tolist(), z[ok].tolist())
             if bal is not None:  # recentred on the thalweg, extended to the farther bank
-                transects.append(bal)
+                usable.append((float(frac), bal[0], bal[1]))
 
-        if not transects:
+        if not usable:
             return {}
-        return geomorph.reach_summary(transects, da_sqkm or 1.0,
-                                      bankfull=bankfull, division=division)
+
+        # Three selectable cross-sections: the highest-relief (most channel-like)
+        # transect within the upstream, middle, and downstream third of the reach.
+        labels = ("Upstream", "Middle", "Downstream")
+        candidates = []
+        for i, label in enumerate(labels):
+            lo, hi = 0.15 + i * (0.70 / 3.0), 0.15 + (i + 1) * (0.70 / 3.0)
+            third = [u for u in usable if lo <= u[0] <= hi] or usable
+            best = max(third, key=lambda u: max(u[2]) - min(u[2]))  # greatest relief
+            c = geomorph.summarize_profile(best[1], best[2], da_sqkm or 1.0,
+                                           bankfull=bankfull, division=division)
+            c["label"] = label
+            candidates.append(c)
+
+        selected = 1 if len(candidates) >= 2 else 0  # default = middle
+        out = dict(candidates[selected])  # top-level = the selected (middle) candidate
+        out["candidates"] = candidates
+        out["selected"] = selected
+        out["n_transects"] = len(usable)
+        return out
     except Exception:  # noqa: BLE001 - resilience by design
         return {}

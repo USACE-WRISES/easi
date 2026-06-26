@@ -127,7 +127,7 @@ def _metric_tip_html(name, definition, calc, note, crit, default):
 
 
 app_ui = ui.page_fillable(
-    ui.head_content(ui.tags.link(rel="stylesheet", href="styles.css?v=2"),
+    ui.head_content(ui.tags.link(rel="stylesheet", href="styles.css?v=6"),
                     ui.tags.script(src="geocode-autocomplete.js", defer=""),
                     ui.tags.script(src="tooltip.js", defer=""),
                     ui.tags.script(src="report-edit.js", defer="")),
@@ -304,6 +304,8 @@ def _outcome_cards(sc):
         cards.append(ui.div(
             ui.div(label, class_="outcome-card-title"),
             ui.div(f'{sub[key]:.2f}', class_="outcome-card-value"),
+            ui.div(scoring.index_band_label(sub[key]), class_="outcome-card-cat",
+                   style=f'background:{scoring.index_band_color(sub[key])};'),
             ui.div(f'{o["direct"]} direct · {o["indirect"]} indirect functions',
                    class_="outcome-card-sub"),
             class_=f"outcome-card {key}",
@@ -311,6 +313,8 @@ def _outcome_cards(sc):
     eci_card = ui.div(
         ui.div("Ecosystem Condition Index", class_="outcome-card-title"),
         ui.div(f'{eci or 0:.2f}', class_="outcome-card-value"),
+        ui.div(scoring.index_band_label(eci or 0), class_="outcome-card-cat",
+               style=f'background:{scoring.index_band_color(eci or 0)};'),
         ui.div("Mean of the three outcome sub-indices", class_="outcome-card-sub"),
         class_="ecosystem-condition-card",
     )
@@ -387,7 +391,15 @@ def _xsection_section(rep):
                                selected="ft", inline=True),
         class_="easi-xs-panel",
     )
-    return ui.div(panel, ui.output_ui("xsection"), class_="easi-xsection-wrap")
+    n_cands = len(xs.get("candidates") or [])
+    switch = ui.div(
+        ui.input_action_button("xs_prev", "◀", class_="easi-xs-arrow"),
+        ui.output_ui("xs_selector"),
+        ui.input_action_button("xs_next", "▶", class_="easi-xs-arrow"),
+        class_="easi-xs-switch",
+    ) if n_cands >= 2 else None
+    right = ui.div(switch, ui.output_ui("xsection"), class_="easi-xs-right")
+    return ui.div(panel, right, class_="easi-xsection-wrap")
 
 
 def _dl_buttons():
@@ -770,7 +782,7 @@ def server(input, output, session):
         merged["report"] = res["report"]
         base_result.set(merged)
         _overrides.set({}); _notes.set({})   # fresh report starts with no overrides/notes
-        _geom_owned.set(set()); _geom_text.set({})
+        _geom_owned.set(set()); _geom_text.set({}); _xs_sel.set(None)
         current_step.set(STEP_REPORT)
         if not modal_shown():
             modal_shown.set(True)
@@ -930,13 +942,36 @@ def server(input, output, session):
             cur.pop(mid, None)
         _notes.set(cur)
 
-    # ---- editable cross-section geometry (bankfull / floodplain heights) ----
+    # ---- editable cross-section geometry (bankfull / low-bank heights) + which of
+    #      the candidate transects (upstream / middle / downstream) is selected -------
     _xs_unit_prev = reactive.value("ft")  # tracks the unit for input conversion
+    _xs_sel = reactive.value(None)        # selected candidate index; None -> stored default
+
+    @reactive.calc
+    def _xs_cross():
+        return ((base_result() or {}).get("report") or {}).get("crossSection") or {}
+
+    @reactive.calc
+    def _xs_candidates():
+        return _xs_cross().get("candidates") or []
+
+    @reactive.calc
+    def _xs_default_sel():
+        return int(_xs_cross().get("selected", 0) or 0)
+
+    @reactive.calc
+    def _xs_sel_idx():
+        cands = _xs_candidates()
+        if not cands:
+            return 0
+        s = _xs_sel()
+        s = _xs_default_sel() if s is None else int(s)
+        return min(max(s, 0), len(cands) - 1)
 
     @reactive.calc
     def _xs_block():
-        base = base_result()
-        block = (((base or {}).get("report") or {}).get("crossSection") or {}).get("geom")
+        cands = _xs_candidates()
+        block = cands[_xs_sel_idx()] if cands else _xs_cross().get("geom")
         return block if (block and block.get("thalweg") is not None) else None
 
     @reactive.calc
@@ -977,43 +1012,73 @@ def server(input, output, session):
         lb_def = round((block["floodplain_stage"] - thal) * per_m, 2)
         return abs(float(bf_h) - bf_def) > 0.005 or abs(float(lb_h) - lb_def) > 0.005
 
-    @reactive.effect
-    @reactive.event(input.xs_bankfull, input.xs_lowbank)
-    def _xs_rerate():
-        """Geometry edits drive the cross-section metrics (floodplain access/entrenchment
-        + engagement frequency); manual picks (via the dropdown) win until the next
-        geometry edit — last action wins. ``_geom_owned`` tracks which ratings are
-        currently geometry-owned (released only by us on revert/reset); ``_geom_text``
-        carries each edited row's metric-specific value text."""
-        if not _xs_block():
-            return
-        g = current_geometry()
+    def _set_geom_metrics(block, bankfull_stage, floodplain_stage, own):
+        """Own (own=True) or release the cross-section-derived metric ratings
+        (floodplain access ER, high flow + channel evolution BHR). Shared by geometry
+        edits and candidate switching; ``_geom_text`` carries each row's value text."""
         cur = dict(_overrides())
         texts = dict(_geom_text())
         owned = set(_geom_owned())
-        if g and _geom_edited():
-            derived = assessment.rate_metrics_from_stages(
-                g["block"], g["bankfull_stage"], g["floodplain_stage"])
+        if own and block:
+            derived = assessment.rate_metrics_from_stages(block, bankfull_stage, floodplain_stage)
             new_owned = set()
             for mid, info in derived.items():
                 if info.get("rating"):
                     cur[mid] = info["rating"]
                     texts[mid] = info.get("valueText", "")
                     new_owned.add(mid)
-            for mid in owned - new_owned:  # release any we previously owned but no longer derive
+            for mid in owned - new_owned:
                 cur.pop(mid, None)
                 texts.pop(mid, None)
             _overrides.set(cur)
             _geom_text.set(texts)
             _geom_owned.set(new_owned)
-            return
-        if owned:  # back to default (or un-ratable): release the ones we own
+        elif owned:  # back to the default candidate, unedited -> release
             for mid in owned:
                 cur.pop(mid, None)
                 texts.pop(mid, None)
             _overrides.set(cur)
             _geom_text.set(texts)
             _geom_owned.set(set())
+
+    @reactive.effect
+    @reactive.event(input.xs_bankfull, input.xs_lowbank)
+    def _xs_rerate():
+        """A height edit (or a non-default candidate) drives the 3 cross-section metrics;
+        a manual dropdown pick wins until the next geometry change (last-action-wins)."""
+        if not _xs_block():
+            return
+        g = current_geometry()
+        own = bool(g and (_geom_edited() or _xs_sel_idx() != _xs_default_sel()))
+        _set_geom_metrics(g["block"] if g else None,
+                          g["bankfull_stage"] if g else None,
+                          g["floodplain_stage"] if g else None, own)
+
+    def _select(delta):
+        """Cycle the selected candidate cross-section (wrap-around), reset the height
+        inputs to its defaults, and re-rate the metrics from it."""
+        cands = _xs_candidates()
+        if len(cands) < 2:
+            return
+        new = (_xs_sel_idx() + delta) % len(cands)
+        _xs_sel.set(new)
+        block = cands[new]
+        per_m = FT_PER_M if input.xs_unit() == "ft" else 1.0
+        thal = block["thalweg"]
+        ui.update_numeric("xs_bankfull", value=round((block["bankfull_stage"] - thal) * per_m, 2))
+        ui.update_numeric("xs_lowbank", value=round((block["floodplain_stage"] - thal) * per_m, 2))
+        _set_geom_metrics(block, block["bankfull_stage"], block["floodplain_stage"],
+                          new != _xs_default_sel())
+
+    @reactive.effect
+    @reactive.event(input.xs_prev)
+    def _xs_go_prev():
+        _select(-1)
+
+    @reactive.effect
+    @reactive.event(input.xs_next)
+    def _xs_go_next():
+        _select(+1)
 
     @reactive.calc
     def scored():
@@ -1042,15 +1107,18 @@ def server(input, output, session):
             return None
         base_xs = (base["report"].get("crossSection") or {})
         g = current_geometry()
-        if not g or (not _geom_edited() and g["unit"] == "ft"):
+        is_default = (g and not _geom_edited() and g["unit"] == "ft"
+                      and _xs_sel_idx() == _xs_default_sel())
+        if not g or is_default:
             return base_xs
         try:
             if _geom_edited():
                 return assessment.cross_section_from_stages(
                     g["block"], g["bankfull_stage"], g["floodplain_stage"], unit=g["unit"])
-            return assessment.cross_section_from_stages(  # default stages, unit switch only
+            # a non-default candidate (or unit switch) at its default stages -> its ER/BHR
+            return assessment.cross_section_from_stages(
                 g["block"], g["bankfull_stage"], g["floodplain_stage"], unit=g["unit"],
-                er=base_xs.get("entrenchment_ratio"), bhr=base_xs.get("bank_height_ratio"),
+                er=g["block"].get("entrenchment_ratio"), bhr=g["block"].get("bank_height_ratio"),
                 edited=False)
         except Exception:  # noqa: BLE001
             return base_xs
@@ -1092,7 +1160,7 @@ def server(input, output, session):
                 ui.div(ui.input_action_button("delineate", "Delineate Basin and Reach",
                                               class_="btn-primary", disabled=not picked),
                        class_="easi-pane-actions"),
-                ui.output_ui("busy"),
+                ui.output_text("busy_text"),
             )
         elif step == STEP_BASIN:
             body = ui.TagList(ui.output_ui("basin_card"),
@@ -1109,7 +1177,7 @@ def server(input, output, session):
                 ui.div(ui.input_action_button("back_to_basin", "Back", class_="btn-outline-secondary"),
                        ui.input_action_button("to_report", "Compute & report", class_="btn-primary"),
                        class_="easi-pane-actions"),
-                ui.output_ui("busy"),
+                ui.output_text("busy_text"),
             )
         else:  # report
             body = ui.TagList(
@@ -1211,15 +1279,14 @@ def server(input, output, session):
             class_="easi-basin-card",
         )
 
-    @render.ui
-    def busy():
+    @render.text
+    def busy_text():
         s = stage()
         running = (delineate_task.status() == "running") or (assess_task.status() == "running")
-        if s and running:
-            # text only — the spinner is a CSS ::before on the persistent #busy
-            # container so it spins continuously while this text re-renders ("3/20").
-            return ui.span(s)
-        return None
+        # A text output updates its textContent in place, so the row never reflows
+        # as "3/20" ticks; the spinner is a CSS ::before on the persistent #busy_text
+        # element (spins continuously). Empty string -> row collapses (no idle gap).
+        return s if (s and running) else ""
 
     @render.ui
     def readout():
@@ -1278,6 +1345,9 @@ def server(input, output, session):
                 _bar("Biological", sub["biological"], scoring.index_band_color(sub["biological"])),
                 class_="easi-cond-bars",
             ),
+            ui.p("Index 0–1 — achievable range ≈0.20 (all functions Poor) to ≈0.87 "
+                 "(all Good); bar color marks the Poor / Fair / Good condition band.",
+                 class_="easi-scale-note"),
         )
 
     @render.ui
@@ -1304,6 +1374,15 @@ def server(input, output, session):
             ui.p(xs.get("caption") or "", class_="easi-xsection-cap"),
             class_="easi-xsection",
         )
+
+    @render.ui
+    def xs_selector():
+        cands = _xs_candidates()
+        if len(cands) < 2:
+            return None
+        i = _xs_sel_idx()
+        label = cands[i].get("label") or str(i + 1)
+        return ui.span(f"{label} ({i + 1} of {len(cands)})", class_="easi-xs-switch-lbl")
 
     @render.ui
     def xs_summary():
@@ -1334,13 +1413,13 @@ def server(input, output, session):
             return f"{x:.2f}" if x is not None else "n/a"
 
         rows = [("Bankfull width", wd(bf_w)),
-                ("Flood-prone width", wd(fp_w) + (" †" if edge else "")),
+                ("Floodprone width", wd(fp_w) + (" †" if edge else "")),
                 ("Entrenchment ratio", rt(er)),
                 ("Bank-height ratio", rt(bhr))]
         body = [ui.tags.tr(ui.tags.th(lbl), ui.tags.td(val)) for lbl, val in rows]
         out = [ui.tags.table(ui.tags.tbody(*body), class_="easi-tbl easi-xs-tbl")]
         if edge:
-            out.append(ui.p("† flood-prone reached the sampled edge; width is "
+            out.append(ui.p("† floodprone reached the sampled edge; width is "
                             "likely under-estimated.", class_="easi-xs-foot"))
         return ui.TagList(*out)
 
@@ -1369,6 +1448,7 @@ def server(input, output, session):
             ui.notification_show("Run an analysis first.", type="message", duration=3)
             return
         _xs_unit_prev.set("ft")  # modal recreated with feet-default inputs
+        _xs_sel.set(None)        # back to the default (middle) cross-section
         _geom_owned.set(set()); _geom_text.set({})
         ui.modal_show(_report_modal(base))
 

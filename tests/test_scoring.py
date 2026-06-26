@@ -138,6 +138,15 @@ def test_index_band_color(value, expected):
 
 
 @pytest.mark.parametrize("value,expected", [
+    (0.10, "Poor"), (0.39, "Poor"), (0.20, "Poor"),
+    (0.40, "Fair"), (0.69, "Fair"), (0.53, "Fair"),
+    (0.70, "Good"), (0.87, "Good"), (1.0, "Good"),
+])
+def test_index_band_label(value, expected):
+    assert scoring.index_band_label(value) == expected
+
+
+@pytest.mark.parametrize("value,expected", [
     (3, "#f5b5b5"), (5, "#f5b5b5"),
     (8, "#f5e7a6"), (10, "#f5e7a6"),
     (13, "#c8d9f2"), (15, "#c8d9f2"),

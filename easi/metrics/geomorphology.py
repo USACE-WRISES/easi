@@ -16,6 +16,18 @@ CHANNEL_EVOL_ID = "channel-evolution-channel-evolution-stage-and-trends"
 CHANNELIZED_FCODES = {33600, 33601, 33603}  # canal/ditch
 
 
+def rate_channel_evolution(bhr) -> "str | None":
+    """Bank-height ratio -> channel-evolution stage rating (incision proxy).
+
+    BHR ~1 floodplain-connected/stable (Good); 1.3-1.7 adjusting (Fair); >1.7
+    incised (Poor). Shared by the default metric and the editable cross-section
+    recompute so the two stay consistent.
+    """
+    if bhr is None:
+        return None
+    return "Good" if bhr < 1.3 else ("Fair" if bhr < 1.7 else "Poor")
+
+
 def channel_evolution(ctx: AnalysisContext) -> MetricResult:
     """Channel evolution stage proxy: channelization flag + DEM bank-height ratio.
 
@@ -31,7 +43,7 @@ def channel_evolution(ctx: AnalysisContext) -> MetricResult:
     bhr = g.get("bank_height_ratio")
     if bhr is None:
         return unavailable(CHANNEL_EVOL_ID, "3DEP incision unavailable for reach", "L")
-    rating = "Good" if bhr < 1.3 else ("Fair" if bhr < 1.7 else "Poor")
+    rating = rate_channel_evolution(bhr)
     return MetricResult(CHANNEL_EVOL_ID, value=bhr,
                         value_text=f"bank-height ratio {bhr} (3DEP 10 m)", rating=rating,
                         confidence="L", source="USGS 3DEP incision proxy",
