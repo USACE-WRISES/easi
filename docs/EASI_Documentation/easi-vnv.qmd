@@ -1,10 +1,6 @@
 ---
 title: "Ecosystem Assessment Screening Index (EASI)"
 subtitle: "Method documentation, verification, and validation"
-author:
-  - "Garrett T. Menichino"
-  - "Leanne M. Stepchinski"
-date: "June 2026"
 abstract: >
   The Ecosystem Assessment Screening Index (EASI) is the Screening tier of the
   Stream Tiered Assessment Framework (STAF). It estimates the condition of
@@ -36,7 +32,7 @@ format:
 
 ::: callout-note-soft
 This document is the extended documentation for EASI. A shorter technical note
-introduces the method for first-time readers (Menichino and Stepchinski 2026).
+introduces the method for first-time readers (Stepchinski and Menichino In Review).
 The EASI web application is available at
 [usace-wrises.github.io/easi](https://usace-wrises.github.io/easi).
 :::
@@ -63,7 +59,7 @@ useful for screening many sites, evaluating alternatives, and tracking change
 over time. Existing screening tools often cover only some stream functions or
 apply only to certain regions. EASI was built to close that gap by compiling
 widely used screening metrics into one consistent assessment that runs nationwide
-(Menichino and Stepchinski 2026).
+(Stepchinski and Menichino In Review).
 
 This document serves three purposes. First, it describes how EASI is
 conceptualized, quantified, and applied. Second, it documents verification, which
@@ -432,10 +428,6 @@ Harrelson, C. C., C. L. Rawlins, and J. P. Potyondy. 1994. Stream Channel
 Reference Sites: An Illustrated Guide to Field Technique. General Technical Report
 RM-245. Fort Collins, CO: U.S. Department of Agriculture, Forest Service.
 
-Menichino, G. T., and L. M. Stepchinski. 2026. Ecosystem Assessment Screening
-Index (EASI). ERDC/TN EMRRP-26-DRAFT. Vicksburg, MS: U.S. Army Engineer Research
-and Development Center.
-
 Palmer, M. A., and J. D. Allan. 2006. Restoring rivers. Issues in Science and
 Technology 22 (2): 40-48.
 
@@ -460,6 +452,10 @@ and Inventory of Stream Functions. River Research and Applications.
 Stepchinski, L. M., S. K. McKay, and G. T. Menichino. In Review b. A Tiered
 Approach to Developing Function-Based Stream Assessments. Journal of the American
 Water Resources Association.
+
+Stepchinski, L. M., and G. T. Menichino. In Review. Ecosystem Assessment Screening
+Index (EASI). ERDC/TN EMRRP-26-DRAFT. Vicksburg, MS: U.S. Army Engineer Research
+and Development Center.
 
 Wohl, E., B. P. Bledsoe, R. B. Jacobson, N. L. Poff, S. L. Rathburn, D. M.
 Walters, and A. C. Wilcox. 2015. The natural sediment regime in rivers:
