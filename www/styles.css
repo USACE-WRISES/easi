@@ -318,13 +318,13 @@ html, body { height: 100%; margin: 0; overflow: hidden; }
 }
 .easi-cfg-row { padding: 3px 0; border-bottom: 1px solid #eef1f6; }
 .easi-cfg-row .form-group, .easi-cfg-row .shiny-input-container { margin-bottom: 0; }
-.easi-cfg-row .checkbox { margin: 0; }
-/* metric name (checkbox label) — keep it in the 12-13px scale so it doesn't dwarf
-   the discipline (12.5) / function (12) headers above it */
-.easi-cfg-row .checkbox label { font-size: 13px; font-weight: 500; color: #2a3344; line-height: 1.35; }
+.easi-cfg-row .shiny-input-container { margin-top: 2px; }       /* dropdown sits just below the name */
+/* metric name (replaces the old checkbox label) — its own line; keep it in the 12-13px
+   scale so it doesn't dwarf the discipline (12.5) / function (12) headers above it */
+.easi-metric-name { display: block; font-size: 13px; font-weight: 500; color: #2a3344; line-height: 1.35; }
 .easi-cfg-row select, .easi-cfg-row .shiny-input-container select { font-size: 12.5px; }
 /* small circled-"i" info button — sits inline right after each name (function name
-   or, inside the checkbox label, the metric name); custom tooltip on hover. */
+   or metric name); custom tooltip on hover. */
 .easi-info {
   margin-left: 5px; flex: none; cursor: help; vertical-align: middle;
   display: inline-flex; align-items: center; justify-content: center;

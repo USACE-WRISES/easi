@@ -158,6 +158,9 @@ data/
   physio_divisions.geojson Fenneman physiographic divisions (Bieger curve selection)
 www/                       styles.css + tooltip/report-edit/geocode JS (served as static assets)
 scripts/build_easi_metrics.py   regenerates data/easi-metrics.json from the STAF source TSV
+scripts/build_docs.py      one-command rebuild of the V&V documentation (assets + Quarto render → www/)
+  run_sfari_sites.py · build_doc_assets.py · sfari_data.py   EASI runs, figures, and SFARI data join
+docs/EASI_Documentation/   V&V report source (Quarto) → www/documentation.html   (see its README)
 tests/                     pytest suite (scoring parity, metric binning, geomorph, report, tooltip)
 requirements.txt           pinned runtime deps (Posit Connect Cloud)   ·   requirements-dev.txt  (+ pytest)
 ```
@@ -171,6 +174,15 @@ python -m pytest
 Covers the STAF scoring rollup parity, per-metric rating bins, cross-section
 geometry (`balanced_profile`, entrenchment / bank-height), the report exports, and
 the report tooltip rendering.
+
+## Documentation
+
+Extended verification and validation documentation is published as a single
+self-contained page at `www/documentation.html`, served by the app and linked from its
+header ("Documentation"). The source is a Quarto report in `docs/EASI_Documentation/`.
+To rebuild it after editing text, values, or figures, run `python scripts/build_docs.py`
+(see [docs/EASI_Documentation/README.md](docs/EASI_Documentation/README.md) for the full
+edit-and-rebuild guide).
 
 ## Methodology & references
 

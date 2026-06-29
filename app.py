@@ -42,6 +42,10 @@ except Exception:  # pragma: no cover
 WATERSHED_STYLE = {"color": "#caa700", "weight": 1, "fillColor": "#fdf24a", "fillOpacity": 0.40}
 REACH_STYLE = {"color": "#d6453d", "weight": 4}
 FLOWLINE_STYLE = {"color": "#1f6feb", "weight": 2, "opacity": 0.9}
+# === TEMP: MMW comparison overlay (remove later) ===
+MMW_STYLE = {"color": "#7b2cbf", "weight": 2, "dashArray": "5,4",
+             "fillColor": "#b388eb", "fillOpacity": 0.18}  # distinct from yellow WATERSHED_STYLE
+# === END TEMP ===
 RATING_COLOR = {"Good": "#c8d9f2", "Fair": "#f5e7a6", "Poor": "#f5b5b5"}
 _DISC_ORDER = ["Hydrology", "Hydraulics", "Geomorphology", "Physicochemistry", "Biology"]
 
@@ -127,10 +131,13 @@ def _metric_tip_html(name, definition, calc, note, crit, default):
 
 
 app_ui = ui.page_fillable(
-    ui.head_content(ui.tags.link(rel="stylesheet", href="styles.css?v=6"),
+    ui.head_content(ui.tags.link(rel="stylesheet", href="styles.css?v=8"),
                     ui.tags.script(src="geocode-autocomplete.js", defer=""),
                     ui.tags.script(src="tooltip.js", defer=""),
                     ui.tags.script(src="report-edit.js", defer="")),
+    # Disable Shiny/bslib's page-level "pulse" loading bar at the top of the screen —
+    # the bottom-right toast is the app's loading indicator (output spinners unaffected).
+    ui.busy_indicators.use(pulse=False),
     ui.div(
         ui.div(
             ui.span("EASI", ui.tags.small("Ecosystem Assessment Screening Index"),
@@ -139,6 +146,11 @@ app_ui = ui.page_fillable(
                 ui.input_action_link("nav_new", "New analysis"),
                 ui.input_action_link("nav_about", "About"),
                 ui.input_action_link("nav_help", "Help"),
+                # Extended documentation (verification & validation) — a static,
+                # self-contained Quarto page served from www/. Opens in a new tab
+                # so the analysis session is preserved.
+                ui.tags.a("Documentation", href="documentation.html",
+                          target="_blank", rel="noopener", class_="easi-doclink"),
                 class_="easi-nav",
             ),
             class_="easi-header",
@@ -670,6 +682,115 @@ def server(input, output, session):
         return await pipeline.assess_only(ctx_inputs, metric_ids=metric_ids,
                                           sources=sources, progress=progress)
 
+    # === TEMP: MMW comparison overlay (remove later — no workflow impact) ===
+    # Overlays the Model My Watershed polygon on the EASI watershed in the Basin
+    # view when the "show_mmw" checkbox is on. Purely a map layer keyed "mmw";
+    # touches no scoring/report/ctx state. No API key (e.g. on deploy) -> the
+    # helper returns a warning and this no-ops. Delete this block + MMW_STYLE +
+    # the checkbox div to remove the feature.
+    mmw_cache = reactive.value({})  # {(lat, lon): watershed_fc} fetched MMW polygons
+    mmw_msg = reactive.value("")    # status line shown under the checkbox
+
+    @reactive.extended_task
+    async def mmw_task(lat: float, lon: float) -> dict:
+        from easi.datasources import mmw
+        fc, _area, _pt, warnings = await anyio.to_thread.run_sync(
+            mmw.delineate_watershed_mmw, lat, lon)
+        return {"lat": lat, "lon": lon, "fc": fc, "warnings": warnings}
+
+    def _mmw_point():
+        d = delin() or {}
+        ci = d.get("ctx_inputs") or {}  # ctx_inputs always carries lat/lon (snapped or original)
+        lat, lon = ci.get("lat"), ci.get("lon")
+        if lat is None or lon is None:
+            dd = d.get("delineation") or {}
+            lat, lon = dd.get("snapped_lat"), dd.get("snapped_lon")
+        return (lat, lon) if (lat is not None and lon is not None) else None
+
+    def _fit_mmw(fc):
+        # Re-fit to EASI+MMW bounds: a comm-added ipyleaflet layer doesn't paint
+        # without a following view change, so this nudge forces the overlay to
+        # render (and frames both basins). Mirrors _delineate_done's fit_bounds.
+        if not _HAS_MAP:
+            return
+        with reactive.isolate():
+            easi_ws = (delin() or {}).get("watershed_geojson")
+        bounds = delineation.geojson_bounds(easi_ws, fc)
+        if bounds:
+            _MAP.fit_bounds(bounds)
+
+    @reactive.effect
+    def _mmw_toggle():
+        # Plain effect (not @reactive.event) so it takes a live dependency on the
+        # dynamically-rendered Basin checkbox — reruns on render and every toggle.
+        on = input.show_mmw()
+        if not _HAS_MAP or not on:
+            _remove_layer("mmw")
+            mmw_msg.set("")
+            return
+        pt = _mmw_point()
+        if pt is None:
+            return
+        with reactive.isolate():
+            cached = mmw_cache().get(pt)
+        if cached is not None:
+            try:
+                _add_layer("mmw", GeoJSON(data=delineation.display_simplify(cached),
+                                          style=MMW_STYLE, name="MMW watershed"))
+                _fit_mmw(cached)
+            except Exception as exc:  # noqa: BLE001
+                ui.notification_show(f"Could not draw MMW overlay: {exc}",
+                                     type="warning", duration=6)
+            mmw_msg.set("")
+            return
+        mmw_msg.set("Fetching MMW watershed…")
+        ui.notification_show("Fetching MMW watershed… please wait", id="mmw_stage",
+                             type="message", duration=None)
+        mmw_task(*pt)
+
+    @reactive.effect
+    def _mmw_done():
+        status = mmw_task.status()
+        if status in ("initial", "running"):
+            return
+        ui.notification_remove("mmw_stage")
+        if status == "error":
+            ui.notification_show("MMW overlay fetch failed.", type="warning", duration=4)
+            mmw_msg.set("MMW watershed unavailable.")
+            return
+        out = mmw_task.result()
+        fc = out.get("fc")
+        if not fc:
+            msg = "; ".join(out.get("warnings") or []) or "no watershed returned"
+            ui.notification_show(f"MMW overlay unavailable: {msg}", type="warning", duration=5)
+            mmw_msg.set("MMW watershed unavailable.")
+            return
+        with reactive.isolate():  # isolate read+write so this effect never re-triggers itself
+            mmw_cache.set({**mmw_cache(), (out["lat"], out["lon"]): fc})
+            draw = bool(input.show_mmw()) and current_step() == STEP_BASIN
+        if draw and _HAS_MAP:
+            try:
+                _add_layer("mmw", GeoJSON(data=delineation.display_simplify(fc),
+                                          style=MMW_STYLE, name="MMW watershed"))
+                _fit_mmw(fc)  # nudge a repaint so the overlay actually paints
+            except Exception as exc:  # noqa: BLE001 - never leave the status stuck
+                ui.notification_show(f"Could not draw MMW overlay: {exc}",
+                                     type="warning", duration=6)
+        mmw_msg.set("")
+
+    @reactive.effect
+    def _mmw_step_sync():
+        # The overlay belongs to the Basin view only; drop it elsewhere so the
+        # (reset-to-off) checkbox and the map layer never disagree.
+        if current_step() != STEP_BASIN:
+            _remove_layer("mmw")
+            mmw_msg.set("")
+
+    @render.text
+    def mmw_status():
+        return mmw_msg()
+    # === END TEMP ===
+
     @reactive.effect
     @reactive.event(input.delineate)
     def _start_delineate():
@@ -762,8 +883,8 @@ def server(input, output, session):
             return
         ui.notification_remove("stage"); stage.set("")
         if status == "error":
-            ui.notification_show("Metric computation failed — try again or deselect a "
-                                 "function in Configure.", type="error", duration=8)
+            ui.notification_show("Metric computation failed — please try again.",
+                                 type="error", duration=8)
             return
         try:
             res = assess_task.result()
@@ -879,15 +1000,9 @@ def server(input, output, session):
     # ---- selection + source choices (configure step) ----
     @reactive.calc
     def selected_metric_ids():
-        out = []
-        for i, mid in enumerate(ALL_MIDS):
-            try:
-                v = input[f"inc_{i}"]()
-            except Exception:
-                v = True
-            if v:
-                out.append(mid)
-        return out
+        # All metrics always run — the per-metric checkboxes were removed from the
+        # Configure page, so this is no longer user-selectable.
+        return list(ALL_MIDS)
 
     @reactive.calc
     def source_choices():
@@ -1164,6 +1279,21 @@ def server(input, output, session):
             )
         elif step == STEP_BASIN:
             body = ui.TagList(ui.output_ui("basin_card"),
+                              # === TEMP: MMW comparison overlay checkbox (remove later) ===
+                              ui.div(ui.input_checkbox("show_mmw",
+                                                       "Overlay MMW watershed (comparison)",
+                                                       value=False),
+                                     # suppress the auto .recalculating spinner on the
+                                     # status text so it never jitters the panel
+                                     ui.tags.style(
+                                         "#mmw_status.recalculating{min-height:0!important;"
+                                         "opacity:1!important}"
+                                         "#mmw_status.recalculating::after{display:none!important}"),
+                                     ui.div(ui.output_text("mmw_status"),
+                                            style="font-size:12px;color:#667;min-height:1em;"
+                                                  "margin:-.1rem 0 .2rem;"),
+                                     style="margin:.4rem 0;"),
+                              # === END TEMP ===
                               ui.div(ui.input_action_button("clear_basin", "Clear",
                                                             class_="btn-outline-secondary"),
                                      ui.input_action_button("to_configure", "Continue",
@@ -1233,8 +1363,8 @@ def server(input, output, session):
         return ui.div(*out)
 
     def _cfg_row(i, mid, meta):
-        # All per-metric detail lives in the ⓘ hover tooltip; the inline row is just
-        # the checkbox + ⓘ (+ a source dropdown where alternatives exist).
+        # All metrics always run, so there's no per-metric checkbox — the inline row is
+        # just the metric name + ⓘ hover (+ a source dropdown where alternatives exist).
         crit = meta.get("criteria") or {}
         tip = "\n".join(filter(None, [
             f"Source: {_ds_label(mid)}",
@@ -1244,10 +1374,9 @@ def server(input, output, session):
             (f"Fair: {crit['Fair']}" if crit.get("Fair") else ""),
             (f"Poor: {crit['Poor']}" if crit.get("Poor") else ""),
         ]))
-        # ⓘ rides inside the checkbox label (right after the name) so it hugs the
-        # text instead of being pushed to the row's right edge.
-        label = ui.span(meta["name"], _info(tip)) if tip else meta["name"]
-        children = [ui.input_checkbox(f"inc_{i}", label, value=True)]
+        # ⓘ rides right after the metric name so it hugs the text.
+        name = ui.span(meta["name"], _info(tip)) if tip else ui.span(meta["name"])
+        children = [ui.span(name, class_="easi-metric-name")]
         if mid in config.SOURCE_OPTIONS:            # interactive source choice stays visible
             opts = {v: lbl for v, lbl in config.SOURCE_OPTIONS[mid]}
             children.append(ui.input_select(f"src_{i}", None, choices=opts,
