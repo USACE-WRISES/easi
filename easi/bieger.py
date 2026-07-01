@@ -37,6 +37,14 @@ COEF: dict[str, dict[str, tuple[float, float]]] = {
     "USA": {"width": (2.70, 0.352), "depth": (0.30, 0.213), "area": (0.95, 0.540)},
 }
 
+# R^2 of the bankfull cross-sectional-area regression per division (Bieger 2015, Table 3).
+AREA_R2: dict[str, float] = {
+    "LUP": 0.50, "APL": 0.84, "AHI": 0.90, "IPL": 0.65, "IHI": 0.55,
+    "RMS": 0.74, "IMP": 0.64, "PMS": 0.66, "USA": 0.58,
+}
+# Display order for the divisions (national curve last).
+_AREA_ORDER = ("LUP", "APL", "AHI", "IPL", "IHI", "RMS", "IMP", "PMS", "USA")
+
 # USGS physiographic DIVISION name (data/physio_divisions.geojson) -> abbr.
 _DIV_ABBR = {
     "LAURENTIAN UPLAND": "LUP", "ATLANTIC PLAIN": "APL",
@@ -118,3 +126,12 @@ def bankfull_geometry(da_sqkm: float, lat: Optional[float] = None,
         "division_name": DIV_NAME.get(key, "National curve"),
         "regional": key != "USA",
     }
+
+
+def area_equations() -> list[tuple[str, str, float, float, float]]:
+    """``(abbr, division name, a, b, R^2)`` for the bankfull cross-sectional-area curve
+    ``A = a * DA^b`` (area in m^2, DA in km^2) of each physiographic division — Bieger
+    et al. 2015, Table 3. Feeds the report info tooltip that documents the regressions.
+    """
+    return [(k, DIV_NAME.get(k, k), COEF[k]["area"][0], COEF[k]["area"][1],
+             AREA_R2.get(k, float("nan"))) for k in _AREA_ORDER]

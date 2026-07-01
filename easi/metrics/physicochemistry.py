@@ -103,8 +103,13 @@ def nutrients(ctx: AnalysisContext) -> MetricResult:
 
     Ecoregion reference criteria + SPARROW modeled backfill are later refinements.
     """
-    tn = wqp.median_value("tn", ctx.lat, ctx.lon)
-    tp = wqp.median_value("tp", ctx.lat, ctx.lon)
+    # Fetch TN and TP concurrently so the metric waits max(tn, tp), not their sum
+    # (each WQP call can take several seconds; this runs on its own worker thread).
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_tn = ex.submit(wqp.median_value, "tn", ctx.lat, ctx.lon)
+        f_tp = ex.submit(wqp.median_value, "tp", ctx.lat, ctx.lon)
+        tn, tp = f_tn.result(), f_tp.result()
     if tn is None and tp is None:
         return unavailable(NUTRIENTS_ID, "no WQP TN/TP observations near reach", "M")
     ratings = []

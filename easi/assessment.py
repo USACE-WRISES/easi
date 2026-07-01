@@ -44,6 +44,7 @@ async def assess(ctx: AnalysisContext, *,
     if progress is not None:
         progress["done"] = 0
         progress["total"] = sum(1 for m in registry.REGISTRY if m in selected)
+        progress["waiting"] = {}   # {service label: in-flight count} for the live "waiting on…" hint
 
     # Regional bankfull (Bieger 2015) for this location — the default geometry the
     # cross-section, ER/BHR, and floodplain hydraulics build on (overrideable in UI).
@@ -56,7 +57,8 @@ async def assess(ctx: AnalysisContext, *,
         _to_thread(wbd.huc12_at_point, ctx.lat, ctx.lon),
         _to_thread(lambda: threedep.reach_geomorphology(
             ctx.reach_geojson, ctx.drainage_area_sqkm,
-            bankfull=(bf["width_m"], bf["depth_m"]), division=bf["division_name"])),
+            bankfull=(bf["width_m"], bf["depth_m"]), bankfull_area_m2=bf["area_m2"],
+            division=bf["division_name"])),
     )
     ctx.extras["streamcat"] = sc
     ctx.extras["landcover"] = lc
@@ -69,6 +71,12 @@ async def assess(ctx: AnalysisContext, *,
 
     # --- run only the SELECTED registered adapters, never failing the run ---
     async def _run(mid: str, fn) -> MetricResult:
+        # These mutations run in the coroutine body on the event-loop thread (only
+        # fn(ctx) runs on a worker), so the shared progress dict needs no lock.
+        svc = registry.EXTERNAL_SERVICE.get(mid)
+        if svc and progress is not None:      # mark this external service as in-flight
+            w = progress.setdefault("waiting", {})
+            w[svc] = w.get(svc, 0) + 1
         try:
             return await _to_thread(fn, ctx)
         except Exception as exc:  # noqa: BLE001
@@ -77,6 +85,12 @@ async def assess(ctx: AnalysisContext, *,
         finally:
             if progress is not None:  # advance the live "X/N" counter
                 progress["done"] = progress.get("done", 0) + 1
+                if svc:               # clear the service once done (count 0 drops the label)
+                    w = progress.get("waiting", {})
+                    if w.get(svc):
+                        w[svc] -= 1
+                        if w[svc] <= 0:
+                            w.pop(svc, None)
 
     to_run = {m: f for m, f in registry.REGISTRY.items() if m in selected}
     results = await asyncio.gather(*[_run(m, f) for m, f in to_run.items()])
@@ -164,6 +178,8 @@ def _xsection_geom_block(geom: dict, slope, fcode=None) -> Optional[dict]:
         "entrenchment_ratio": geom.get("entrenchment_ratio"),
         "bank_height_ratio": geom.get("bank_height_ratio"),
         "edge_limited": geom.get("edge_limited"),
+        "bankfull_area_m2": geom.get("bankfull_area_m2"),
+        "bankfull_area_edge_limited": geom.get("bankfull_area_edge_limited"),
         "division": geom.get("bankfull_division"),
         "fcode": fcode,
     }
@@ -174,11 +190,15 @@ def _build_cross_section(geom: dict, slope=None, fcode=None, unit: str = "ft") -
     middle / downstream) and render the selected one's PNG (others render on demand
     when switched in the report)."""
     cand_geoms = geom.get("candidates") or [geom]
+    res = geom.get("dem_resolution_m")
+    src = f"USGS 3DEP {res} m DEM" if res else "USGS 3DEP DEM"
     blocks = []
     for c in cand_geoms:
         b = _xsection_geom_block(c, slope, fcode)
         if b is not None:
             b["label"] = c.get("label")
+            b["dem_resolution_m"] = res     # 1 or 10; drives the plot's source caption
+            b["dem_source"] = src
             blocks.append(b)
     if not blocks:
         return None
@@ -193,7 +213,7 @@ def _build_cross_section(geom: dict, slope=None, fcode=None, unit: str = "ft") -
             entrenchment_ratio=er, bank_height_ratio=bhr,
             bankfull_width_m=block["bankfull_width_m"],
             bankfull_depth_m=block["bankfull_depth_m"],
-            division=block["division"], unit=unit)
+            division=block["division"], unit=unit, source=src)
         return {"png_b64": png_b64, "geom": block, "candidates": blocks, "selected": sel,
                 "entrenchment_ratio": er, "bank_height_ratio": bhr,
                 "caption": _xsection_caption(er, bhr, block["division"])}
@@ -227,7 +247,7 @@ def cross_section_from_stages(block: dict, bankfull_stage: float,
         st, el, bankfull_stage=bankfull_stage, floodplain_stage=floodplain_stage,
         thalweg=thalweg, entrenchment_ratio=er, bank_height_ratio=bhr,
         bankfull_width_m=bf_w, bankfull_depth_m=bf_d,
-        division=block.get("division"), unit=unit)
+        division=block.get("division"), unit=unit, source=block.get("dem_source"))
     return {"png_b64": png_b64, "geom": block,
             "entrenchment_ratio": er, "bank_height_ratio": bhr,
             "caption": _xsection_caption(er, bhr, block.get("division"), edited=edited)}

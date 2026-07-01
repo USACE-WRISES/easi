@@ -36,6 +36,18 @@ REGISTRY = {
     biology.BIOINTEGRITY_ID: biology.biological_integrity,
 }
 
+# Metrics that make a live call to an external federal web service (as opposed to
+# reading prefetched StreamCat/NLCD/3DEP data). These are the slow tail of a run;
+# the assessment surfaces the friendly service name in its live progress label so a
+# slow service reads as "waiting on <service>" instead of a frozen counter.
+EXTERNAL_SERVICE = {
+    physicochemistry.IMPAIRMENT_ID: "EPA ATTAINS",
+    physicochemistry.NUTRIENTS_ID: "Water Quality Portal",
+    physicochemistry.TEMPERATURE_ID: "Water Quality Portal",
+    biology.INVASIVES_ID: "USGS NAS",
+    biology.BARRIERS_ID: "USACE NID",
+}
+
 # StreamCat base metric names needed by the registered adapters (one batched call
 # returns ws / cat / wsrp100 / catrp100 variants for each).
 STREAMCAT_NAMES = [

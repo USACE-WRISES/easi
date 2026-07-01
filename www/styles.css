@@ -49,10 +49,12 @@ h1, h2, h3, h4, h5, h6, .card-header { font-family: var(--font-head); }
 .easi-tbl th { background: #fafbfd; font-weight: 600; border-bottom: 2px solid #d7dce5; }
 .easi-disc td { background: #f3f5f9; font-weight: 600; color: var(--easi-accent); }
 .easi-chip { padding: 2px 8px; border-radius: 10px; font-size: 11.5px; font-weight: 600; }
-.easi-bar-track { flex: 1; background: #edeef2; border-radius: 3px; height: 16px; }
-.easi-bar-fill { height: 16px; border-radius: 3px; }
 .easi-bar-row { display: flex; gap: 8px; align-items: center; margin: 3px 0; }
-.easi-cond-bars { margin: 10px 0 16px; max-width: 620px; }
+.easi-bar-row.indent { margin-left: 18px; }
+.easi-bar-label { width: 184px; flex: none; font-size: 12px; line-height: 1.2; }
+.easi-bar-track { flex: 1; background: #edeef2; border-radius: 3px; height: 15px; }
+.easi-bar-fill { height: 15px; border-radius: 3px; }
+.easi-bar-val { width: 34px; flex: none; text-align: right; font-size: 12px; font-weight: 600; }
 /* in-table rating override (chip-styled native <select>) + per-metric notes */
 .easi-rate-sel {
   -webkit-appearance: none; -moz-appearance: none; appearance: none;
@@ -73,20 +75,10 @@ h1, h2, h3, h4, h5, h6, .card-header { font-family: var(--font-head); }
 .easi-rate-sel:hover, .easi-rate-sel:focus {
   border-color: var(--easi-accent); box-shadow: 0 1px 5px rgba(20, 40, 80, .18); outline: none;
 }
-/* overridden row: accent stripe + faint tint + a small pill in the Source cell */
+/* manually overridden row: accent stripe + faint tint. Cross-section-derived rows are
+   intentionally NOT tinted (they aren't manual overrides — see _metric_table). */
 .easi-row-ovr td { background: #f3f7fd; }
 .easi-row-ovr td:first-child { box-shadow: inset 3px 0 0 var(--easi-accent); }
-.easi-ovr-pill {
-  display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .02em;
-  text-transform: uppercase; color: var(--easi-accent);
-  background: #e6edf8; border-radius: 9px; padding: 1px 7px;
-}
-/* cross-section-derived rating: a calmer, distinct pill (not a manual override) */
-.easi-xs-pill {
-  display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .02em;
-  text-transform: uppercase; color: #3a7d5c;
-  background: #e6f0ea; border-radius: 9px; padding: 1px 7px;
-}
 /* per-metric note: icon button + expandable textarea sub-row */
 .easi-note-cell { width: 46px; text-align: center; }
 .easi-note-btn {
@@ -109,6 +101,92 @@ h1, h2, h3, h4, h5, h6, .card-header { font-family: var(--font-head); }
 }
 
 /* --------------------------------------------------------------------------- */
+/* Metric-table display toggles (STAF "screening" controls; www/report-controls.js) */
+/* Detail columns/rows/badges are always rendered but hidden until the matching     */
+/* checkbox flips a class on #easi-report — purely client-side, so a toggle never    */
+/* re-renders a Shiny output (no flicker / no .recalculating spinner).               */
+/* --------------------------------------------------------------------------- */
+.easi-metric-toolbar {
+  display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center;
+  margin: 2px 0 8px; padding: 7px 10px;
+  background: #f6f8fc; border: 1px solid var(--card-border); border-radius: 8px;
+}
+.easi-toggle-item {
+  display: inline-flex; align-items: center; gap: 5px; margin: 0; font-weight: 500;
+  font-size: 12px; color: #33415c; cursor: pointer; user-select: none;
+}
+.easi-toggle-item input { cursor: pointer; margin: 0; }
+
+/* default-hidden detail (revealed by the wrapper classes below) */
+.easi-col-adv, .easi-col-map { display: none; }
+.easi-fnf-badge, .easi-auto-cue { display: none; }
+.easi-rollup-row { display: none; }
+
+#easi-report.show-adv .easi-col-adv { display: table-cell; }
+#easi-report.show-map .easi-col-map { display: table-cell; }
+#easi-report.show-rollup .easi-rollup-row { display: table-row; }
+#easi-report.show-fnf .easi-fnf-badge { display: inline-block; }
+#easi-report.show-suggested .easi-auto-cue { display: inline; }
+
+/* mapping cells (D / i / –) read as compact centered codes */
+.easi-col-map { text-align: center; font-weight: 600; color: #46536e; }
+
+/* function-score cell: score + band badge + auto cue on one line */
+.easi-fs-cell { white-space: nowrap; }
+.easi-fnf-badge {
+  margin-left: 6px; padding: 0 6px; border-radius: 9px; vertical-align: middle;
+  font-size: 10px; font-weight: 700; color: #2a3344;
+}
+.easi-auto-cue { margin-left: 6px; font-size: 11px; color: #8791a6; font-style: italic; }
+
+/* Function Score: read-only STAF-style slider vs the plain number, chosen by the
+   "show-slider" toggle (wrapper ships .show-slider, so the slider is the default). Both are
+   emitted in the cell; CSS shows one — flipping is instant, no re-render. */
+#easi-report.show-slider .easi-fscore-plain { display: none; }
+.easi-fslider { display: none; align-items: center; gap: 8px; vertical-align: middle; }
+#easi-report.show-slider .easi-fslider { display: inline-flex; }
+.easi-fslider-bars { width: 108px; }
+.easi-fslider-labels { display: none; }              /* NF/AR/F above the track (Show F/AR/NF) */
+#easi-report.show-slider.show-fnf .easi-fslider-labels { display: flex; margin-bottom: 2px; }
+.easi-fslider-labels span {
+  flex: 1; text-align: center; font-size: 8px; font-weight: 700; color: #6b7280; line-height: 1;
+}
+.easi-fslider-track {
+  position: relative; height: 6px; border-radius: 3px;
+  background: linear-gradient(to right, #f5b5b5 0 33.33%, #f5e7a6 33.33% 66.66%,
+                              #c8d9f2 66.66% 100%);
+}
+.easi-fslider-knob {
+  position: absolute; top: 50%; width: 11px; height: 11px; border-radius: 50%;
+  background: #fff; border: 2px solid #33415c; transform: translate(-50%, -50%);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .2);
+}
+.easi-fslider-num { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* integrated outcome rollup: two renderings toggled purely by the mappings state (no
+   re-render). Aligned <tfoot> — values sit under the P/C/B columns — shows when mappings
+   are ON; the right-justified standalone table shows when mappings are OFF. */
+.easi-metrics-block { margin: 0 0 6px; }
+#easi-report:not(.show-map) .easi-rollup-foot { display: none; }
+#easi-report.show-map .easi-rollup-standalone { display: none; }
+/* center the mapping column (header, D/i/– codes, and the aligned rollup values) so they
+   line up in-column — beats the base left-aligned .easi-tbl th/td */
+.easi-tbl th.easi-col-map, .easi-tbl td.easi-col-map { text-align: center; }
+.easi-tbl th.easi-rollup-lbl { text-align: right; font-weight: 700; color: var(--easi-accent); }
+.easi-rollup-foot td, .easi-tbl.easi-rollup-standalone td { font-variant-numeric: tabular-nums; }
+.easi-tbl.easi-rollup-standalone td { text-align: center; min-width: 3.4rem; }
+.easi-tbl.easi-rollup-standalone thead th { text-align: center; }
+/* full-width: the label column stretches so the values sit at the right; the label text is
+   right-justified (like the mappings-on footer) so it hugs the values */
+.easi-tbl.easi-rollup-standalone th.easi-rollup-lbl { text-align: right; width: 100%; }
+.easi-rollup-foot td.easi-band, .easi-rollup-standalone td.easi-band {
+  font-weight: 700; color: #26324a;
+}
+/* standalone (mappings hidden): full-width block — label far left, values on the right
+   under its own P/C/B header (the aligned tfoot uses the table's headers instead) */
+.easi-rollup-standalone { width: 100%; margin: 6px 0 0; }
+
+/* --------------------------------------------------------------------------- */
 /* STAF screening-summary layout (report modal)                                */
 /* --------------------------------------------------------------------------- */
 .easi-summary-head { margin-bottom: 0.7rem; }
@@ -120,44 +198,39 @@ h1, h2, h3, h4, h5, h6, .card-header { font-family: var(--font-head); }
 }
 .easi-fact b { color: var(--eci-title); font-weight: 600; }
 
-.outcome-cards {
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.5rem; margin: 0 0 0.5rem;
+/* two-panel summary plots: function scores (grouped by category) | condition indices */
+.easi-summary-plots {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 18px;
+  align-items: start; margin: 6px 0 14px;
 }
-.outcome-card, .ecosystem-condition-card {
-  background: #fff; border: 1px solid var(--card-border); border-radius: 6px;
-  padding: 0.55rem 0.7rem 0.6rem; font-size: 0.82rem; line-height: 1.45;
+@media (max-width: 760px) { .easi-summary-plots { grid-template-columns: 1fr; } }
+.easi-plot-panel { min-width: 0; }
+.easi-plot-title {
+  font-family: var(--font-head); font-weight: 700; font-size: 0.95rem;
+  color: var(--eci-title); margin: 0 0 4px;
 }
-.outcome-card.physical   { border-top: 3px solid var(--phys-border); }
-.outcome-card.chemical   { border-top: 3px solid var(--chem-border); }
-.outcome-card.biological { border-top: 3px solid var(--bio-border); }
-.outcome-card-title {
-  margin: 0 0 0.2rem; font-family: var(--font-head); font-weight: 700; font-size: 0.85rem;
+.easi-plot-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0 0 8px; }
+.easi-leg-item { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #556; }
+.easi-leg-sw {
+  width: 11px; height: 11px; border-radius: 2px; display: inline-block;
+  border: 1px solid rgba(0, 0, 0, .18);
 }
-.outcome-card.physical   .outcome-card-title { color: var(--phys-title); }
-.outcome-card.chemical   .outcome-card-title { color: var(--chem-title); }
-.outcome-card.biological .outcome-card-title { color: var(--bio-title); }
-.outcome-card-value { font-family: var(--font-head); font-size: 1.5rem; font-weight: 700; line-height: 1.1; }
-.outcome-card-cat { display: inline-block; margin-top: 0.25rem; padding: 1px 9px; border-radius: 10px;
-  font-size: 0.76rem; font-weight: 700; color: #2a3550; }
-.outcome-card-sub { font-size: 0.76rem; color: #667; margin-top: 0.15rem; }
-.easi-scale-note { font-size: 11.5px; color: #667; margin: 0.55rem 0 0; line-height: 1.35; }
-
-.ecosystem-condition-card {
-  margin: 0.5rem 0 0; border-top: 3px solid;
-  border-image: linear-gradient(to right, var(--phys-border), var(--chem-border), var(--bio-border)) 1;
+.easi-fn-block { margin-bottom: 7px; }
+.easi-fn-group {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: #3a6ea5; margin: 4px 0 2px;
 }
-.ecosystem-condition-card .outcome-card-title { color: var(--eci-title); }
 
 /* cross-section block: summary table + editable inputs (left) beside the plot (right) */
 .easi-xsection-wrap {
-  display: grid; grid-template-columns: 250px 1fr; gap: 10px;
-  align-items: stretch; margin: 12px 0;
+  display: grid; grid-template-columns: 300px 1fr; gap: 10px;
+  align-items: stretch; margin: 12px 0;   /* plot column matches the left card's height */
 }
 .easi-xsection {
   border: 1px solid var(--card-border); border-radius: 8px; padding: 8px;
   background: #fff; text-align: center; min-width: 0;
-  display: flex; flex-direction: column; justify-content: center;
+  display: flex; flex-direction: column; justify-content: flex-start;
+  flex: 1; min-height: 300px;              /* fill the column height (safety floor 300px) */
 }
 .easi-xsection img { max-width: 100%; height: auto; }
 .easi-xsection-cap { font-size: 11px; color: #667; margin: 4px 0 0; }
@@ -171,8 +244,8 @@ h1, h2, h3, h4, h5, h6, .card-header { font-family: var(--font-head); }
   font-size: 0.9rem; margin-bottom: 6px;
 }
 .easi-xs-tbl { margin-bottom: 8px; }
-.easi-xs-tbl th { background: transparent; font-weight: 600; }
-.easi-xs-tbl td { text-align: right; white-space: nowrap; }
+.easi-xs-tbl th { background: transparent; font-weight: 600; white-space: nowrap; }
+.easi-xs-tbl td { text-align: right; }
 .easi-xs-foot { font-size: 10.5px; color: #993366; margin: 0 0 8px; }
 .easi-xs-fields { display: flex; gap: 10px; }
 .easi-xs-fields .shiny-input-container { flex: 1; margin-bottom: 6px; }
@@ -181,11 +254,19 @@ h1, h2, h3, h4, h5, h6, .card-header { font-family: var(--font-head); }
 .easi-xs-panel .shiny-options-group { font-size: 12px; }
 .easi-xs-panel .btn { margin-top: 2px; align-self: flex-start; }
 
-/* candidate cross-section selector — overlay at the top-right of the plot */
-.easi-xs-right { position: relative; min-width: 0; }
+/* plot column: a header row (title + candidate selector) sits above the Plotly plot,
+   clear of the modebar (which stays top-right inside the plot). */
+.easi-xs-right { display: flex; flex-direction: column; min-width: 0; }
+.easi-xs-plot-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 2px;
+}
+.easi-xs-plot-title {
+  font-family: var(--font-head); font-weight: 600; color: var(--eci-title);
+  font-size: 0.95rem;
+}
 .easi-xs-switch {
-  position: absolute; top: 6px; right: 8px; z-index: 5;
-  display: flex; align-items: center; gap: 2px;
+  display: flex; align-items: center; gap: 2px; flex: none;
   background: rgba(255, 255, 255, .9); border: 1px solid var(--card-border);
   border-radius: 7px; padding: 1px 3px; box-shadow: 0 1px 3px rgba(16, 24, 40, .08);
 }
@@ -437,6 +518,12 @@ details[open] > summary.easi-cfg-group::before { transform: rotate(90deg); }
    spinner, so neutralize Shiny's here only. */
 #busy_text.recalculating { min-height: 0 !important; opacity: 1 !important; }
 #busy_text.recalculating::after { display: none !important; }
+/* Same overlay, same fix, inside the report modal. Every in-modal recompute (candidate
+   switch, rating/note edit) is an instant, cached operation, so Shiny's .recalculating
+   overlay (opacity:0.3 + min-height:32px + ::after spinner) only turns those swaps into a
+   full-report flash. Neutralize it so the numbers just update in place. */
+.modal-body .recalculating { min-height: 0 !important; opacity: 1 !important; }
+.modal-body .recalculating::after { display: none !important; }
 .easi-spinner {
   width: 15px; height: 15px; border: 2px solid #cdd8ec; border-top-color: var(--easi-accent);
   border-radius: 50%; animation: easi-spin .8s linear infinite; flex: none;
@@ -445,7 +532,10 @@ details[open] > summary.easi-cfg-group::before { transform: rotate(90deg); }
 
 /* row of pane action buttons */
 .easi-pane-actions { display: flex; gap: 8px; margin-top: 12px; }
-.easi-pane-actions .btn { flex: 1; }
+/* keep labels on one line so a narrow button (e.g. "Compute & report") does not
+   wrap to two lines and stretch the whole row taller via align-items: stretch;
+   trim the vertical padding so the single-line buttons stay compact */
+.easi-pane-actions .btn { flex: 1; white-space: nowrap; padding-top: 7px; padding-bottom: 7px; }
 
 /* bottom-right toasts (StreamStats placement) */
 #shiny-notification-panel { top: auto !important; bottom: 14px !important; right: 14px !important; left: auto !important; width: 330px; }

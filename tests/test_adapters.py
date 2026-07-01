@@ -361,3 +361,96 @@ def test_wqp_fetch_parses_quoted_comma_fields(monkeypatch):
     )
     monkeypatch.setattr(wqp.requests, "get", lambda *a, **k: _FakeResp(csv_text))
     assert wqp.median_value("temp", 40.0, -83.0) == 20.6
+
+
+# --- fail-fast: external-service timeouts + concurrent nutrients fetch --------- #
+def test_external_datasource_timeouts_are_short():
+    # Guard against regressing back to the old 25-40s timeouts that parked the
+    # "Computing metrics… N/20" counter for tens of seconds when a service was slow.
+    import inspect
+
+    from easi.datasources import attains, nas, nid_barriers
+    def _default(fn, name="timeout"):
+        return inspect.signature(fn).parameters[name].default
+    assert _default(wqp.median_value) <= 12
+    assert _default(attains.impairment_at_point) <= 10
+    assert _default(attains.impairment_near_point) <= 10
+    assert _default(nid_barriers.barriers_near) <= 12
+    assert _default(nas.established_taxa) <= 12
+
+
+def test_nutrients_fetches_tn_tp_concurrently(monkeypatch):
+    # nutrients() issues two WQP calls; they must overlap (max, not sum) so a slow
+    # portal doesn't double the wait. Each stub sleeps 0.3s -> concurrent ~0.3s.
+    import time
+
+    def _slow(param, lat, lon, *a, **k):
+        time.sleep(0.3)
+        return {"tn": 0.4, "tp": 0.03}.get(param)
+    monkeypatch.setattr(physicochemistry.wqp, "median_value", _slow)
+    t0 = time.perf_counter()
+    r = physicochemistry.nutrients(_ctx())
+    elapsed = time.perf_counter() - t0
+    assert r.value == {"tn": 0.4, "tp": 0.03}     # both fetched
+    assert elapsed < 0.5                            # overlapped (~0.3s), not sequential (~0.6s)
+
+
+# --- best-available 3DEP resolution (1 m else 10 m) ------------------------ #
+def _fake_py3dep(avail, one_metre_finite=1.0, one_metre_raises=False):
+    import types
+
+    import numpy as np
+
+    def _da(frac):
+        a = np.arange(100, dtype=float)
+        a[int(100 * frac):] = np.nan
+        return types.SimpleNamespace(
+            values=a, rio=types.SimpleNamespace(reproject=lambda crs: ("dem", crs)))
+
+    def get_dem(geom, resolution):
+        if resolution == 1:
+            if one_metre_raises:
+                raise RuntimeError("1 m boom")
+            return _da(one_metre_finite)
+        return _da(1.0)                              # 10 m always good
+    return types.SimpleNamespace(check_3dep_availability=lambda bbox: avail, get_dem=get_dem)
+
+
+@pytest.mark.parametrize("avail,finite,raises,expected", [
+    ({"1m": True}, 1.0, False, 1),                  # 1 m present + valid -> 1 m
+    ({"1m": True}, 0.2, False, 10),                 # 1 m present but mostly NaN -> 10 m
+    ({"1m": False}, 1.0, False, 10),                # no 1 m coverage -> 10 m
+    ({"1m": True}, 1.0, True, 10),                  # 1 m fetch errors -> 10 m
+])
+def test_best_available_dem_resolution(monkeypatch, avail, finite, raises, expected):
+    import sys
+    import types
+
+    from easi.datasources import threedep
+    monkeypatch.setitem(sys.modules, "py3dep",
+                        _fake_py3dep(avail, finite, raises))
+    buf = types.SimpleNamespace(bounds=(0.0, 0.0, 1.0, 1.0))
+    _, res = threedep._best_available_dem(buf)
+    assert res == expected
+
+
+def test_channel_evolution_reports_dem_resolution():
+    ctx = _ctx(fcode=46006)
+    ctx.extras["reach_geomorph"] = {"bank_height_ratio": 1.2, "dem_resolution_m": 1}
+    assert "(3DEP 1 m)" in geomorphology.channel_evolution(ctx).value_text
+    ctx2 = _ctx(fcode=46006)                          # resolution unknown -> defaults to 10 m
+    ctx2.extras["reach_geomorph"] = {"bank_height_ratio": 1.2}
+    assert "(3DEP 10 m)" in geomorphology.channel_evolution(ctx2).value_text
+
+
+def test_build_cross_section_threads_dem_source():
+    from easi import assessment
+    st = list(range(0, 101))
+    el = [10.0 if not (40 <= x <= 60) else 6 + abs(x - 50) * 0.4 for x in st]
+    geom = geomorph.summarize_profile(st, el, 50.0, division="Interior Plains")
+    geom["candidates"] = [dict(geom, label=lab) for lab in ("Upstream", "Middle", "Downstream")]
+    geom["selected"] = 1
+    geom["dem_resolution_m"] = 1
+    cs = assessment._build_cross_section(geom, slope=0.004, fcode=None)
+    assert cs["geom"]["dem_resolution_m"] == 1
+    assert cs["geom"]["dem_source"] == "USGS 3DEP 1 m DEM"

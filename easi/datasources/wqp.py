@@ -69,8 +69,14 @@ def _value_field(fieldnames: Optional[list[str]]) -> Optional[str]:
 
 
 def median_value(param: str, lat: float, lon: float, within_mi: float = 5.0,
-                 start: str = "01-01-2015", timeout: float = 40.0) -> Optional[float]:
-    """Median observed value for 'tn'|'tp'|'temp' near the point, or None."""
+                 start: str = "01-01-2015", timeout: float = 10.0) -> Optional[float]:
+    """Median observed value for 'tn'|'tp'|'temp' near the point, or None.
+
+    ``timeout`` is deliberately short (fail-fast): WQP is an opportunistic source and
+    this runs in an interactive screening flow, so a slow/overloaded portal should fall
+    back to the metric's surrogate quickly rather than stall the report for tens of
+    seconds. Raise it if you need to catch data in dense-monitoring regions.
+    """
     chars = SYNONYMS.get(param)
     if not chars:
         return None

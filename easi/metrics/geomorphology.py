@@ -44,8 +44,9 @@ def channel_evolution(ctx: AnalysisContext) -> MetricResult:
     if bhr is None:
         return unavailable(CHANNEL_EVOL_ID, "3DEP incision unavailable for reach", "L")
     rating = rate_channel_evolution(bhr)
+    res = g.get("dem_resolution_m") or 10
     return MetricResult(CHANNEL_EVOL_ID, value=bhr,
-                        value_text=f"bank-height ratio {bhr} (3DEP 10 m)", rating=rating,
+                        value_text=f"bank-height ratio {bhr} (3DEP {res} m)", rating=rating,
                         confidence="L", source="USGS 3DEP incision proxy",
                         note="bank-height-ratio proxy for channel evolution stage")
 

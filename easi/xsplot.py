@@ -38,7 +38,8 @@ def cross_section_png(stations, elevs, *, bankfull_stage: Optional[float] = None
                       bankfull_depth_m: Optional[float] = None,
                       division: Optional[str] = None,
                       unit: str = "ft",
-                      title: str = "Representative cross-section") -> bytes:
+                      title: str = "Representative cross-section",
+                      source: Optional[str] = None) -> bytes:
     """Render the cross-section as PNG bytes (placeholder PNG on any failure).
 
     The Y axis is **height above the channel bottom** (thalweg = 0); both axes are
@@ -92,6 +93,8 @@ def cross_section_png(stations, elevs, *, bankfull_stage: Optional[float] = None
         xb = float(np.max(np.abs(xs))) if xs.size else 1.0  # symmetric about channel center
         ax.set_xlim(-xb, xb)
         fig.tight_layout()
+        if source:  # small data-source caption, bottom-right (e.g., "USGS 3DEP 1 m DEM")
+            fig.text(0.995, 0.01, source, ha="right", va="bottom", fontsize=6.5, color="#999")
         out = io.BytesIO()
         fig.savefig(out, format="png", dpi=130)
         plt.close(fig)

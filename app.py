@@ -23,8 +23,8 @@ os.environ.setdefault("HYRIVER_CACHE_EXPIRE", str(7 * 24 * 3600))
 import anyio  # noqa: E402
 from shiny import App, reactive, render, ui  # noqa: E402
 
-from easi import (assessment, config, delineation, geomorph, pipeline,  # noqa: E402
-                  report, scoring)
+from easi import (assessment, bieger, config, delineation, geomorph,  # noqa: E402
+                  pipeline, report, scoring)
 from easi.datasources import flowlines  # noqa: E402
 from easi.datasources.geocode import geocode_address  # noqa: E402
 from easi.pipeline import DEFAULT_REACH_FT  # noqa: E402
@@ -32,12 +32,18 @@ from easi.pipeline import DEFAULT_REACH_FT  # noqa: E402
 FT_PER_M = 3.28083989501312
 
 try:
-    from ipyleaflet import GeoJSON, LayersControl, Map, Marker, TileLayer
+    from ipyleaflet import GeoJSON, LayersControl, Map, Marker, ScaleControl, TileLayer
     from ipywidgets import Layout
     from shinywidgets import output_widget, reactive_read, render_widget
     _HAS_MAP = True
 except Exception:  # pragma: no cover
     _HAS_MAP = False
+
+try:
+    import plotly.graph_objects  # noqa: F401  (interactive cross-section plot)
+    _HAS_PLOTLY = _HAS_MAP       # also needs shinywidgets (output_widget/render_widget)
+except Exception:  # pragma: no cover
+    _HAS_PLOTLY = False
 
 WATERSHED_STYLE = {"color": "#caa700", "weight": 1, "fillColor": "#fdf24a", "fillOpacity": 0.40}
 REACH_STYLE = {"color": "#d6453d", "weight": 4}
@@ -56,11 +62,6 @@ USGS_ATTR = "USGS The National Map"
 FLOW_ZOOM = 14          # NHD vectors appear at/above this zoom
 SNAP_TOL_FT = 150.0     # click must land within this distance of a flowline
 
-OUTCOME_META = [
-    ("physical", "Physical", "Hydrology · Hydraulics · Geomorphology"),
-    ("chemical", "Chemical", "Thermal · Nutrients · Impairment"),
-    ("biological", "Biological", "Habitat · Community"),
-]
 STEP_IDENTIFY, STEP_BASIN, STEP_CONFIGURE, STEP_REPORT = "identify", "basin", "configure", "report"
 STEP_LABELS = [(STEP_IDENTIFY, "Identify"), (STEP_BASIN, "Basin"),
                (STEP_CONFIGURE, "Configure"), (STEP_REPORT, "Report")]
@@ -103,20 +104,23 @@ def _info(text: str = None, *, html_tip: str = None):
     return ui.span("i", attrs, class_="easi-info")
 
 
-def _metric_tip_html(name, definition, calc, note, crit, default):
-    """Build the report ⓘ tooltip card: definition, calculation, then scoring criteria.
-
-    All dynamic values are HTML-escaped; the surrounding markup is app-controlled.
+def _metric_tip_html(name, definition, source, calc, note, crit, default):
+    """Build the report ⓘ tooltip card: definition, data source, calculation, then the
+    scoring criteria. Source is where the input value comes from; Calculation is any extra
+    computation on top of it. All dynamic values are HTML-escaped; markup is app-controlled.
     """
     e = html.escape
     parts = [f'<div class="easi-tip-title">{e(name or "")}</div>']
     if definition:
         parts.append('<div class="easi-tip-sec"><span class="easi-tip-lbl">Definition</span>'
                      f'{e(definition)}</div>')
-    if calc:
+    if source:
         sub = f'<div class="easi-tip-sub">{e(note)}</div>' if note else ""
+        parts.append('<div class="easi-tip-sec"><span class="easi-tip-lbl">Source</span>'
+                     f'{e(source)}{sub}</div>')
+    if calc:
         parts.append('<div class="easi-tip-sec"><span class="easi-tip-lbl">Calculation</span>'
-                     f'{e(calc)}{sub}</div>')
+                     f'{e(calc)}</div>')
     rows = []
     for band in ("Good", "Fair", "Poor"):
         c = crit.get(band)
@@ -130,11 +134,33 @@ def _metric_tip_html(name, definition, calc, note, crit, default):
     return "".join(parts)
 
 
+def _bieger_area_tip_html(current_name: str | None = None) -> str:
+    """Info card listing the Bieger (2015) bankfull cross-sectional-area regressions for
+    every physiographic division; the analysis point's division is bolded."""
+    e = html.escape
+    parts = ['<div class="easi-tip-title">Bieger bankfull XS-area curves</div>',
+             '<div class="easi-tip-sec"><span class="easi-tip-lbl">Regression</span>'
+             'A = a·DA<sup>b</sup> — area in m², drainage area in km² '
+             '(Bieger et al. 2015, Table 3).</div>',
+             '<div class="easi-tip-sec"><span class="easi-tip-lbl">Physiographic division</span>']
+    lines = []
+    for _abbr, name, a, b, r2 in bieger.area_equations():
+        eq = f"A = {a:g}·DA<sup>{b:g}</sup> (R²={r2:.2f})"
+        line = f"{e(name)}: {eq}"
+        if current_name and name == current_name:
+            line = f"<b>{line}</b>"
+        lines.append(f'<div class="easi-tip-crit">{line}</div>')
+    parts.append("".join(lines) + "</div>")
+    return "".join(parts)
+
+
 app_ui = ui.page_fillable(
-    ui.head_content(ui.tags.link(rel="stylesheet", href="styles.css?v=8"),
+    ui.head_content(ui.tags.link(rel="stylesheet", href="styles.css?v=21"),
                     ui.tags.script(src="geocode-autocomplete.js", defer=""),
                     ui.tags.script(src="tooltip.js", defer=""),
-                    ui.tags.script(src="report-edit.js", defer="")),
+                    ui.tags.script(src="report-edit.js", defer=""),
+                    ui.tags.script(src="report-controls.js", defer=""),
+                    ui.tags.script(src="coord-entry.js", defer="")),
     # Disable Shiny/bslib's page-level "pulse" loading bar at the top of the screen —
     # the bottom-right toast is the app's loading indicator (output spinners unaffected).
     ui.busy_indicators.use(pulse=False),
@@ -179,32 +205,74 @@ def _chip(text, color):
     return ui.span(text, class_="easi-chip", style=f"background:{color};")
 
 
-def _bar(label, value, color, vmax=1.0):
+def _bar(label, value, color, *, vmax=1.0, value_fmt="{:.2f}", indent=False):
+    """One horizontal bar row: label, a track with a colored fill, and the value.
+
+    ``vmax`` scales the fill (1.0 for 0–1 indices, 15 for 0–15 function scores);
+    ``value_fmt`` formats the printed value; ``indent`` nudges the sub-index rows in so
+    they read as children of the Ecosystem Condition Index above them.
+    """
     pct = 0.0 if value is None else max(0.0, min(1.0, value / vmax)) * 100
+    val_txt = "—" if value is None else value_fmt.format(value)
     return ui.div(
-        ui.div(label, style="width:210px;font-size:13px;"),
+        ui.div(label, class_="easi-bar-label"),
         ui.div(ui.div(class_="easi-bar-fill", style=f"width:{pct:.1f}%;background:{color};"),
                class_="easi-bar-track"),
-        ui.div("—" if value is None else f"{value:.2f}",
-               style="width:46px;text-align:right;font-size:13px;font-weight:600;"),
-        class_="easi-bar-row",
+        ui.div(val_txt, class_="easi-bar-val"),
+        class_="easi-bar-row" + (" indent" if indent else ""),
     )
 
 
-def _confidence_summary(rep):
-    counts, na, ov = {}, 0, 0
-    for r in rep["metricRows"]:
-        if r["status"] == "override":
-            ov += 1
-        if r["rating"] in ("Good", "Fair", "Poor"):
-            counts[r["confidence"]] = counts.get(r["confidence"], 0) + 1
-        else:
-            na += 1
-    parts = [f"{k}: {counts[k]}" for k in ("H", "M", "M/L", "L") if counts.get(k)]
-    txt = "Confidence — " + " · ".join(parts) + f" · n/a: {na}"
-    if ov:
-        txt += f" · {ov} override(s)"
-    return txt
+def _plot_legend(items):
+    """A small color-swatch legend; ``items`` is a list of (color, label)."""
+    return ui.div(
+        *[ui.span(ui.span(class_="easi-leg-sw", style=f"background:{c};"), txt,
+                  class_="easi-leg-item") for c, txt in items],
+        class_="easi-plot-legend",
+    )
+
+
+def _summary_plots(sc):
+    """Two-panel summary: all 20 function scores grouped by STAF category (left), and
+    the condition indices with the Ecosystem index as parent of its three sub-indices
+    (right). Bars are colored by their Functioning / At-Risk / Non-Functioning band."""
+    fscores, sub = sc["functionScores"], sc["subIndices"]
+    eci = sc["ecosystemConditionIndex"]
+
+    groups: dict[str, list] = {}
+    for fn in config.functions():
+        groups.setdefault(fn["category"], []).append(fn)
+    fn_blocks = []
+    for cat, fns in groups.items():
+        bars = [_bar(fn["name"], fscores.get(fn["id"]),
+                     scoring.function_score_band_color(fscores.get(fn["id"]) or 0),
+                     vmax=config.FUNCTION_SCORE_MAX, value_fmt="{:.0f}")
+                for fn in fns]
+        fn_blocks.append(ui.div(ui.div(cat, class_="easi-fn-group"), *bars,
+                                class_="easi-fn-block"))
+    left = ui.div(
+        ui.div("Function scores", class_="easi-plot-title"),
+        _plot_legend([(scoring.function_score_band_color(15), "Functioning 11–15"),
+                      (scoring.function_score_band_color(8), "At-Risk 6–10"),
+                      (scoring.function_score_band_color(0), "Non-Functioning 0–5")]),
+        *fn_blocks,
+        class_="easi-plot-panel",
+    )
+    right = ui.div(
+        ui.div("Condition indices", class_="easi-plot-title"),
+        _plot_legend([(scoring.index_band_color(1.0), "Functioning 0.70–1.00"),
+                      (scoring.index_band_color(0.5), "At-Risk 0.40–0.69"),
+                      (scoring.index_band_color(0.0), "Non-Functioning 0.00–0.39")]),
+        _bar("Ecosystem Condition Index", eci, scoring.index_band_color(eci or 0)),
+        _bar("Physical", sub["physical"], scoring.index_band_color(sub["physical"]),
+             indent=True),
+        _bar("Chemical", sub["chemical"], scoring.index_band_color(sub["chemical"]),
+             indent=True),
+        _bar("Biological", sub["biological"], scoring.index_band_color(sub["biological"]),
+             indent=True),
+        class_="easi-plot-panel",
+    )
+    return ui.div(left, right, class_="easi-summary-plots")
 
 
 def _rate_select(mid, r):
@@ -227,12 +295,66 @@ def _rate_select(mid, r):
                                   "data-mid": mid, "title": "Click to override rating"})
 
 
-def _metric_table(rows, notes=None):
+# Long labels for the mapping (D/i/–) cells, shown as a hover title.
+_MAP_CODE = {"D": ("D", "Direct effect"), "i": ("i", "Indirect effect"),
+             "-": ("–", "No mapped effect")}
+
+
+def _fnscore_cell(r, meta):
+    """The Function Score cell. Emits BOTH a read-only STAF-style slider and the plain number
+    (+ F/AR/NF badge); a CSS class flip on #easi-report (``show-slider``) chooses which shows,
+    so switching is instant with no re-render. On overridden rows a faint ``(auto: N)`` cue is
+    appended (shown by ``show-suggested``)."""
+    fs = r.get("functionScore")
+    if fs is None:
+        return ui.tags.td("", class_="easi-fs-cell")
+    pct = max(2.0, min(98.0, fs / config.FUNCTION_SCORE_MAX * 100))
+    # read-only slider: 3-band track (NF/AR/F) with a knob at the score; the NF/AR/F labels
+    # above the track are revealed by the "Show F/AR/NF labels" checkbox (as in STAF).
+    slider = ui.div(
+        ui.div(
+            ui.div(ui.tags.span("NF"), ui.tags.span("AR"), ui.tags.span("F"),
+                   class_="easi-fslider-labels"),
+            ui.div(ui.div(class_="easi-fslider-knob", style=f"left:{pct:.1f}%;"),
+                   class_="easi-fslider-track"),
+            class_="easi-fslider-bars"),
+        ui.tags.span(str(fs), class_="easi-fslider-num"),
+        class_="easi-fslider")
+    # plain number + colored F/AR/NF badge (shown when the slider is toggled off)
+    plain = ui.tags.span(
+        str(fs),
+        ui.tags.span(scoring.function_score_band_label(fs), class_="easi-fnf-badge",
+                     style=f"background:{scoring.function_score_band_color(fs)};"),
+        class_="easi-fscore-plain")
+    kids = [slider, plain]
+    if r.get("status") == "override":
+        gen = r.get("generatedRating")
+        if gen in config.RATINGS:
+            auto = scoring.function_score(
+                scoring.rating_to_index(gen, (meta.get(r["metricId"]) or {}).get("indexMidpoints")))
+            kids.append(ui.tags.span(f"(auto: {auto})", class_="easi-auto-cue"))
+    return ui.tags.td(*kids, class_="easi-fs-cell")
+
+
+def _metric_table(rows, notes=None, *, outcomes=None, eci=None):
+    """The metric grid. Always emits every column/badge (Index, Physical/Chemical/Biological
+    mapping, F/AR/NF badge, auto cue) so the report's display checkboxes can reveal them
+    purely client-side (CSS class flips on #easi-report) with no Shiny re-render. When
+    ``outcomes`` is given the integrated rollup is appended flush below the table."""
     notes = notes or {}
+    meta = config.metrics_by_id()
+    mapping = config.cwa_mapping()
+    # Column set (order matters); classed columns are hidden until their checkbox is on.
     head = ui.tags.tr(
-        *[ui.tags.th(h) for h in
-          ["Function", "Metric", "Value", "Rating", "Index", "Fn", "Conf", "Source"]],
+        ui.tags.th("Function"), ui.tags.th("Metric"), ui.tags.th("Value"),
+        ui.tags.th("Rating"),
+        ui.tags.th("Function Score"),
+        ui.tags.th("Phy", {"title": "Physical"}, class_="easi-col-map"),
+        ui.tags.th("Chem", {"title": "Chemical"}, class_="easi-col-map"),
+        ui.tags.th("Bio", {"title": "Biological"}, class_="easi-col-map"),
+        ui.tags.th("Index", class_="easi-col-adv"),
         ui.tags.th("Note", class_="easi-note-cell"))
+    n_cols = 10
     body = []
     order = {d: i for i, d in enumerate(_DISC_ORDER)}
     rows = sorted(rows, key=lambda r: (order.get(r["discipline"], 99), r["functionName"]))
@@ -241,25 +363,32 @@ def _metric_table(rows, notes=None):
         mid = r["metricId"]
         if r["discipline"] not in seen:
             seen.append(r["discipline"])
-            body.append(ui.tags.tr(ui.tags.td(r["discipline"], colspan="9"), class_="easi-disc"))
+            body.append(ui.tags.tr(ui.tags.td(r["discipline"], colspan=str(n_cols)),
+                                    class_="easi-disc"))
         status = r.get("status")
-        is_ovr = status == "override"          # manual dropdown override
-        is_xs = status == "xs-derived"         # rating recomputed from an edited cross-section
-        # Rating cell: override dropdown + an ⓘ whose hover shows the computed default
-        # value and the Good/Fair/Poor criteria.
+        is_ovr = status == "override"          # manual dropdown override — the only tinted row
+        # (cross-section-derived rows, status "xs-derived", are NOT tinted: they aren't
+        # manual overrides. Their provenance shows in the ⓘ tooltip's Source section.)
+        # Rating cell: override dropdown + an ⓘ whose hover shows the definition, the data
+        # source + how it's calculated, and the Good/Fair/Poor criteria. (The standalone
+        # Source column was dropped — its content now lives in the tooltip's Source section.)
         crit = (_METRICS.get(mid, {}).get("criteria") or {})
         tip_html = _metric_tip_html(
             name=r.get("name"), definition=config.METRIC_DEFINITIONS.get(mid, ""),
-            calc=r.get("source") or "", note=r.get("note") or "", crit=crit,
-            default=r.get("generatedRating") or "n/a")
+            source=r.get("source") or "", note=r.get("note") or "",
+            calc=(config.METRIC_CALCULATIONS.get(mid)
+                  or "Dataset value used directly (binned to a rating)."),
+            crit=crit, default=r.get("generatedRating") or "n/a")
         rating_cell = ui.tags.td(ui.div(_rate_select(mid, r), _info(html_tip=tip_html),
                                         class_="easi-rate-cell"))
-        if is_ovr:
-            src_cell = ui.tags.td(ui.span("override", class_="easi-ovr-pill"))
-        elif is_xs:
-            src_cell = ui.tags.td(ui.span("cross-section", class_="easi-xs-pill"))
-        else:
-            src_cell = ui.tags.td(r["source"] or "", style="font-size:11px;color:#666;")
+        idx = r.get("index")
+        idx_cell = ui.tags.td("—" if idx is None else f"{idx:.2f}", class_="easi-col-adv")
+        codes = mapping.get(r.get("functionId"), {})
+        map_cells = []
+        for key in config.OUTCOMES:
+            txt, title = _MAP_CODE.get(codes.get(key, "-"), _MAP_CODE["-"])
+            map_cells.append(ui.tags.td(txt, {"title": f"{key.capitalize()}: {title}"},
+                                        class_="easi-col-map"))
         note = notes.get(mid) or ""
         note_btn = ui.tags.button("✎", {
             "class": "easi-note-btn" + (" has-note" if note else ""), "data-mid": mid,
@@ -270,67 +399,96 @@ def _metric_table(rows, notes=None):
             ui.tags.td(r["name"]),
             ui.tags.td(r["valueText"]),
             rating_cell,
-            ui.tags.td("" if r["index"] is None else f'{r["index"]:.2f}'),
-            ui.tags.td("" if r["functionScore"] is None else str(r["functionScore"])),
-            ui.tags.td(r["confidence"] or ""),
-            src_cell,
+            _fnscore_cell(r, meta),
+            *map_cells,
+            idx_cell,
             ui.tags.td(note_btn, class_="easi-note-cell"),
             {"data-mid": mid},
-            class_=("easi-row-ovr" if (is_ovr or is_xs) else ""),
+            class_=("easi-row-ovr" if is_ovr else ""),
             style=("" if r["rating"] else "color:#aaa;"),
         ))
         body.append(ui.tags.tr(
             ui.tags.td(ui.tags.textarea(note, {
                 "class": "easi-note-ta", "data-mid": mid, "rows": "2",
-                "placeholder": "Add a note for this metric…"}), colspan="9"),
+                "placeholder": "Add a note for this metric…"}), colspan=str(n_cols)),
             {"data-mid": mid}, class_="easi-note-row"))
-    return ui.tags.table(ui.tags.thead(head), ui.tags.tbody(*body), class_="easi-tbl")
+    if outcomes is None:
+        return ui.tags.table(ui.tags.thead(head), ui.tags.tbody(*body), class_="easi-tbl")
+    # The outcome rollup is rendered two ways, toggled purely by CSS on the mappings state so
+    # it always reads like part of the table (STAF-style, no re-render):
+    #  - an aligned <tfoot> INSIDE the table, whose P/C/B values sit under the mapping columns
+    #    (shown when "Show function mappings" is on), and
+    #  - a right-justified standalone table below it (shown when mappings are hidden).
+    table = ui.tags.table(
+        ui.tags.thead(head), ui.tags.tbody(*body),
+        ui.tags.tfoot(*_rollup_rows(outcomes, eci, aligned=True), class_="easi-rollup-foot"),
+        class_="easi-tbl")
+    # the standalone (mappings-off) rollup carries its own Physical/Chemical/Biological
+    # header — there are no mapping columns above to align to; the aligned tfoot omits it
+    # (the table's own P/C/B headers serve).
+    # mappings-off standalone is full-width with room for the full outcome names
+    sa_head = ui.tags.thead(ui.tags.tr(
+        ui.tags.th(""), ui.tags.th("Physical"), ui.tags.th("Chemical"),
+        ui.tags.th("Biological")))
+    standalone = ui.tags.table(
+        sa_head, ui.tags.tbody(*_rollup_rows(outcomes, eci, aligned=False)),
+        class_="easi-tbl easi-rollup-standalone")
+    return ui.div(table, standalone, class_="easi-metrics-block")
 
 
-def _outcome_table(outcomes):
-    keys = ["physical", "chemical", "biological"]
-    head = ui.tags.tr(ui.tags.th(""), *[ui.tags.th(k.capitalize()) for k in keys])
-
-    def row(label, fn):
-        return ui.tags.tr(ui.tags.th(label), *[ui.tags.td(fn(outcomes[k])) for k in keys])
-
-    return ui.tags.table(
-        ui.tags.thead(head),
-        ui.tags.tbody(
-            row("Direct functions", lambda o: str(o["direct"])),
-            row("Indirect functions", lambda o: str(o["indirect"])),
-            row("Weighted total", lambda o: f'{o["weighted"]:.2f}'),
-            row("Max weighted", lambda o: f'{o["max"]:.2f}'),
-            row("Sub-index", lambda o: f'{o["subIndex"]:.2f}'),
-        ),
-        class_="easi-tbl",
-    )
+_ROLLUP_KEYS = ("physical", "chemical", "biological")
 
 
-def _outcome_cards(sc):
-    sub, out = sc["subIndices"], sc["outcomes"]
-    eci = sc["ecosystemConditionIndex"]
-    cards = []
-    for key, label, _desc in OUTCOME_META:
-        o = out[key]
-        cards.append(ui.div(
-            ui.div(label, class_="outcome-card-title"),
-            ui.div(f'{sub[key]:.2f}', class_="outcome-card-value"),
-            ui.div(scoring.index_band_label(sub[key]), class_="outcome-card-cat",
-                   style=f'background:{scoring.index_band_color(sub[key])};'),
-            ui.div(f'{o["direct"]} direct · {o["indirect"]} indirect functions',
-                   class_="outcome-card-sub"),
-            class_=f"outcome-card {key}",
-        ))
-    eci_card = ui.div(
-        ui.div("Ecosystem Condition Index", class_="outcome-card-title"),
-        ui.div(f'{eci or 0:.2f}', class_="outcome-card-value"),
-        ui.div(scoring.index_band_label(eci or 0), class_="outcome-card-cat",
-               style=f'background:{scoring.index_band_color(eci or 0)};'),
-        ui.div("Mean of the three outcome sub-indices", class_="outcome-card-sub"),
-        class_="ecosystem-condition-card",
-    )
-    return ui.TagList(ui.div(*cards, class_="outcome-cards"), eci_card)
+def _rollup_rows(outcomes, eci, *, aligned):
+    """Rows for the outcome rollup, shared by both renderings (see ``_metric_table``).
+
+    ``aligned=True`` builds the metric table's ``<tfoot>`` so the three values land under the
+    Physical/Chemical/Biological columns. The label spans the five always-visible left columns
+    (Function..Function Score) and is right-justified, so its text sits directly left of the
+    values with no blank column between. After the values come a placeholder for the Index
+    column (``easi-col-adv``, positioned *after* the mapping columns so it collapses with them
+    when "Show advanced" is off without ever gapping the label from the values) and a note
+    cell — 10 columns total. ``aligned=False`` builds the full-width standalone table (label +
+    three values, no placeholders). Direct/Indirect/Weighted/Max carry ``easi-rollup-row``
+    (revealed by "Show roll-up at bottom"); Outcome Sub-index and Ecosystem Condition Index
+    always show, tinted by their condition band."""
+    val_cls = "easi-col-map" if aligned else ""
+
+    def label(text):
+        return ui.tags.th(text, {"colspan": "5"} if aligned else {}, class_="easi-rollup-lbl")
+
+    def value(text, *, tint=None, span=None):
+        attrs = {"class": (val_cls + (" easi-band" if tint is not None else "")).strip()}
+        if tint is not None:
+            attrs["style"] = f"background:{scoring.index_band_color(tint)};"
+        if span:
+            attrs["colspan"] = str(span)
+        return ui.tags.td(text, attrs)
+
+    # Trailing cells (aligned only): the Index placeholder collapses with the (now
+    # after-the-values) Index column; the empty note cell keeps the row at 10 columns.
+    def trail():
+        return [ui.tags.td("", class_="easi-col-adv"),
+                ui.tags.td("", class_="easi-note-cell")] if aligned else []
+
+    def row(label_th, cells, cls):
+        return ui.tags.tr(label_th, *cells, *trail(), class_=cls)
+
+    def calc(lbl, fn):
+        return row(label(lbl), [value(fn(outcomes[k])) for k in _ROLLUP_KEYS], "easi-rollup-row")
+
+    return [
+        calc("Direct functions", lambda o: str(o["direct"])),
+        calc("Indirect functions", lambda o: str(o["indirect"])),
+        calc("Weighted total", lambda o: f'{o["weighted"]:.1f}'),
+        calc("Max weighted", lambda o: f'{o["max"]:.1f}'),
+        row(label("Outcome Sub-index"),
+            [value(f'{outcomes[k]["subIndex"]:.2f}', tint=outcomes[k]["subIndex"])
+             for k in _ROLLUP_KEYS], "easi-subindex-row"),
+        row(label("Ecosystem Condition Index"),
+            [value("—" if eci is None else f"{eci:.2f}", tint=eci, span=3)],
+            "easi-eci-row"),
+    ]
 
 
 def _summary_header(d):
@@ -339,26 +497,27 @@ def _summary_header(d):
 
     lat, lon = d.get("snapped_lat"), d.get("snapped_lon")
     snapped = f"{lat:.4f}, {lon:.4f}" if lat is not None and lon is not None else "—"
+    # Identity (COMID/HUC12) and drainage live in the basin table; the watershed area
+    # duplicated the drainage area, so only the analysis point and reach are chipped here.
     return ui.div(
         ui.h3(d.get("gnis_name") or "(unnamed reach)"),
         ui.div(
-            fact("COMID", d.get("comid")),
-            fact("HUC12", d.get("huc12") or "—"),
-            fact("Drainage", f'{d.get("drainage_area_sqkm")} km²'),
-            fact("Watershed", f'{d.get("watershed_area_sqkm")} km²'),
+            fact("Analysis Point", snapped),
             fact("Reach", f'{d.get("reach_length_ft")} ft upstream'),
-            fact("Snapped", snapped),
             class_="easi-facts",
         ),
         class_="easi-summary-head",
     )
 
 
-def _basin_block(rep):
-    rows = (rep or {}).get("basin", {}).get("rows") or []
+def _basin_block(d, rep):
+    # Identity (COMID, HUC12) moved out of the header chips into this table; the data
+    # exports already carry these fields, so they're prepended here at the view layer only.
+    ident = [["COMID", d.get("comid")], ["HUC12", d.get("huc12") or "—"]]
+    rows = ident + list((rep or {}).get("basin", {}).get("rows") or [])
     if not rows:
         return None
-    body = [ui.tags.tr(ui.tags.th(lbl), ui.tags.td(val)) for lbl, val in rows]
+    body = [ui.tags.tr(ui.tags.th(lbl), ui.tags.td(str(val))) for lbl, val in rows]
     return ui.tags.details(
         ui.tags.summary("Basin characteristics", class_="easi-section-title easi-rollup-sum"),
         ui.tags.table(ui.tags.tbody(*body), class_="easi-tbl", style="max-width:560px;"),
@@ -379,7 +538,6 @@ def _xsection_section(rep):
     thalweg = block.get("thalweg")
     if thalweg is None:  # no editable geometry — render the static image only
         return ui.div(ui.tags.img(src=f"data:image/png;base64,{xs['png_b64']}"),
-                      ui.p(xs.get("caption") or "", class_="easi-xsection-cap"),
                       class_="easi-xsection")
 
     def ft(stage):
@@ -387,14 +545,17 @@ def _xsection_section(rep):
 
     bf_def = ft(block.get("bankfull_stage"))
     lb_def = ft(block.get("floodplain_stage"))
-    bf_tip = (f"Default {bf_def} ft — bankfull depth from the Bieger et al. (2015) regional "
-              f"hydraulic-geometry curve for the {block.get('division') or 'national'} "
-              f"physiographic division. Edit to use a surveyed value.")
+    bk_area = block.get("bankfull_area_m2")
+    area_txt = f"{bk_area:.1f} m² " if bk_area is not None else ""
+    bf_tip = (f"Default {bf_def} ft — the depth at which the channel cross-sectional area "
+              f"equals the Bieger et al. (2015) regional bankfull area "
+              f"({area_txt}for the {block.get('division') or 'national'} division). "
+              f"Edit to use a surveyed value.")
     panel = ui.div(
         ui.div("Cross-section geometry", class_="easi-xs-panel-title"),
         ui.output_ui("xs_summary"),
         ui.div(
-            ui.input_numeric("xs_bankfull", ui.span("Bankfull height ", _info(text=bf_tip)),
+            ui.input_numeric("xs_bankfull", ui.span("Bankfull depth ", _info(text=bf_tip)),
                              value=bf_def, min=0, step=0.1),
             ui.input_numeric("xs_lowbank", "Low bank height", value=lb_def, min=0, step=0.1),
             class_="easi-xs-fields",
@@ -410,7 +571,11 @@ def _xsection_section(rep):
         ui.input_action_button("xs_next", "▶", class_="easi-xs-arrow"),
         class_="easi-xs-switch",
     ) if n_cands >= 2 else None
-    right = ui.div(switch, ui.output_ui("xsection"), class_="easi-xs-right")
+    head = ui.div(ui.span("Representative cross-section", class_="easi-xs-plot-title"),
+                  switch, class_="easi-xs-plot-head")
+    plot = (ui.div(output_widget("xsection_plot", height="100%"), class_="easi-xsection")
+            if _HAS_PLOTLY else ui.output_ui("xsection"))
+    right = ui.div(head, plot, class_="easi-xs-right")
     return ui.div(panel, right, class_="easi-xsection-wrap")
 
 
@@ -424,27 +589,59 @@ def _dl_buttons():
     )
 
 
+# Display toggles above the metric table (STAF "screening" controls). Plain HTML checkboxes
+# wired by www/report-controls.js, which flips a class on #easi-report — purely client-side,
+# so toggling reveals detail instantly with no Shiny re-render (hence no flicker/spinner).
+# (class, label, default_on). All default off except the Function Score slider, which the
+# user wants on by default so they can compare it against the plain number.
+_METRIC_TOGGLES = [
+    ("show-slider", "Show function score slider", True),
+    ("show-adv", "Show advanced scoring columns", False),
+    ("show-map", "Show function mappings", False),
+    ("show-rollup", "Show roll-up at bottom", False),
+    ("show-suggested", "Show suggested function scores", False),
+    ("show-fnf", "Show F/AR/NF labels", False),
+]
+
+
+def _metric_toolbar():
+    items = []
+    for cls, label, default_on in _METRIC_TOGGLES:
+        attrs = {"type": "checkbox", "class": "easi-toggle", "data-cls": cls}
+        if default_on:
+            attrs["checked"] = "checked"
+        items.append(ui.tags.label(ui.tags.input(attrs), ui.tags.span(label),
+                                   class_="easi-toggle-item"))
+    return ui.div(*items, class_="easi-metric-toolbar")
+
+
 def _report_modal(base):
-    """Static modal skeleton: override-independent chrome + dynamic output slots."""
+    """Static modal skeleton: override-independent chrome + dynamic output slots.
+
+    The dynamic body lives inside a stable ``#easi-report`` wrapper so the display-toggle
+    classes set by www/report-controls.js persist across the metric table's re-render on a
+    rating override (the re-rendered table inherits them via descendant CSS)."""
     d, rep = base["delineation"], base.get("report")
-    return ui.modal(
+    body = ui.div(
         _summary_header(d),
-        ui.output_ui("m_scores"),
-        _basin_block(rep),
+        _basin_block(d, rep),
         _xsection_section(rep),
-        ui.tags.details(
-            ui.tags.summary("Outcome rollup", class_="easi-section-title easi-rollup-sum"),
-            ui.output_ui("m_outcomes"),
-            class_="easi-rollup",
-        ),
         ui.div("Metrics", class_="easi-section-title"),
-        ui.div("Adjust a rating inline in the Rating column; click ✎ on any row to add a note. "
-               "Edits flow into the report and exports.", class_="easi-instr"),
-        ui.output_ui("m_metrics"),
+        ui.div("Adjust a rating inline in the Rating column; click ✎ on any row to add a "
+               "note. Use the checkboxes above to show more scoring detail. Edits flow into "
+               "the report and exports.", class_="easi-instr"),
+        _metric_toolbar(),
+        ui.output_ui("m_metrics"),          # metric table + integrated outcome rollup
+        ui.div("Summary plots", class_="easi-section-title"),
+        ui.output_ui("m_scores"),           # moved below the table (STAF layout)
         ui.p("Generated from national datasets — a desktop screening estimate with "
              "per-metric confidence, not a field-validated assessment. Adjust field "
              "metrics inline to incorporate local evidence.", class_="easi-disclaimer"),
         _dl_buttons(),
+        id="easi-report", class_="show-slider",   # slider on by default (report-controls.js
+    )                                             # reconciles with any saved preference)
+    return ui.modal(
+        body,
         # ✕ lives in the modal header (anchors to .modal-content) so it sits at the
         # popup's top-right corner and stays put when the body scrolls.
         title=ui.TagList(
@@ -480,7 +677,7 @@ def server(input, output, session):
     delin = reactive.value(None)           # delineate_only result (+ ctx_inputs)
     base_result = reactive.value(None)     # merged delineation + report dict
     stage = reactive.value("")             # progress label
-    _assess_prog = {"done": 0, "total": 0}  # shared metric-progress counter (poller reads)
+    _assess_prog = {"done": 0, "total": 0, "waiting": {}}  # shared metric-progress state (poller reads)
     _overrides = reactive.value({})        # {metricId: "Good"/"Fair"/"Poor"} from the table
     _notes = reactive.value({})            # {metricId: note text} from the table
     _geom_owned = reactive.value(set())    # metricIds whose rating is currently derived from
@@ -519,15 +716,21 @@ def server(input, output, session):
         clicked = reactive.value(None)
 
         def _build_map():
-            mp = Map(center=(39.5, -98.35), zoom=4, scroll_wheel_zoom=True,
+            mp = Map(center=(39.5, -98.35), zoom=4, max_zoom=19, scroll_wheel_zoom=True,
                      layout=Layout(height="100%"))  # fill the wrapper (default is 400px)
             mp.clear_layers()  # drop default OSM
+            # The USGS basemap caches stop at zoom 16 (service maxScale ~1:9028); past that the
+            # tiles do not exist and the map goes blank. max_native_zoom=16 makes Leaflet upscale
+            # the zoom-16 tiles at higher zoom so the basemap stays visible (softer when deep in).
             # last-added base layer is the default -> USGS Topo on top (rivers + names)
-            mp.add(TileLayer(url=USGS_IMAGERY_URL, name="USGS Imagery", base=True, attribution=USGS_ATTR))
-            mp.add(TileLayer(url=USGS_TOPO_URL, name="USGS Topo", base=True, attribution=USGS_ATTR))
+            mp.add(TileLayer(url=USGS_IMAGERY_URL, name="USGS Imagery", base=True,
+                             attribution=USGS_ATTR, max_native_zoom=16, max_zoom=19))
+            mp.add(TileLayer(url=USGS_TOPO_URL, name="USGS Topo", base=True,
+                             attribution=USGS_ATTR, max_native_zoom=16, max_zoom=19))
             mp.add(TileLayer(url=USGS_HYDRO_URL, name="NHD Hydrography", base=False,
-                             opacity=0.85, attribution=USGS_ATTR))
+                             opacity=0.85, attribution=USGS_ATTR, max_native_zoom=16, max_zoom=19))
             mp.add(LayersControl(position="topright"))
+            mp.add(ScaleControl(position="bottomright", metric=True, imperial=True))
             mp.on_interaction(_on_map_interaction)
             return mp
 
@@ -634,6 +837,54 @@ def server(input, output, session):
             else:
                 ui.notification_show("You didn't click on a stream line — zoom in and click "
                                      "a blue stream line.", type="warning", duration=5)
+
+        # ---- typed lat/long -> recenter the map + snap (same path as a click) ----
+        @reactive.extended_task
+        async def coord_snap_task(lat: float, lon: float) -> dict:
+            d = 0.012  # same ~0.8 mi half-box as a map click
+            return {"hit": await anyio.to_thread.run_sync(
+                lambda: flowlines.nearest_point_on_lines(
+                    flowlines.flowlines_in_bbox(lon - d, lat - d, lon + d, lat + d), lat, lon))}
+
+        @reactive.effect
+        def _apply_coord_snap():
+            try:
+                res = coord_snap_task.result()
+            except Exception:
+                return
+            hit = res.get("hit")
+            if hit and hit[2] <= SNAP_TOL_FT:
+                _apply_snap(hit)
+            else:
+                # No stream near the typed point: place nothing and clear any stale point
+                # so "Delineate" stays disabled until a real stream is found.
+                _remove_layer("marker")
+                snapped_point.set(None)
+                ui.notification_show(
+                    "No stream within 150 ft of those coordinates. Adjust them, or zoom in "
+                    "and click a blue stream line.", type="warning", duration=6)
+
+        @reactive.effect
+        @reactive.event(input.coords_entered)
+        def _coords_entered():
+            # Typed Latitude/Longitude (committed on Enter/blur via coord-entry.js).
+            if current_step() != STEP_IDENTIFY:
+                return
+            ev = input.coords_entered() or {}
+            lat, lon = ev.get("lat"), ev.get("lon")
+            if lat is None or lon is None:
+                return  # incomplete entry -> place nothing
+            try:
+                lat, lon = float(lat), float(lon)
+            except (TypeError, ValueError):
+                return
+            if not (24.0 <= lat <= 50.0 and -125.0 <= lon <= -66.0):
+                ui.notification_show("Coordinates must be within the continental "
+                                     "United States.", type="warning", duration=5)
+                return
+            _MAP.center = (lat, lon)   # bring the typed point into view so it is visible
+            _MAP.zoom = 15
+            coord_snap_task(lat, lon)
 
     # ---- address geocode -> recenter the map so streams appear ----
     @reactive.effect
@@ -857,7 +1108,7 @@ def server(input, output, session):
             return
         modal_shown.set(False)
         n = len(selected_metric_ids())
-        _assess_prog["done"], _assess_prog["total"] = 0, n
+        _assess_prog["done"], _assess_prog["total"], _assess_prog["waiting"] = 0, n, {}
         stage.set(f"Computing metrics… 0/{n}")
         ui.notification_show(f"Computing metrics… 0/{n} — please wait", id="stage",
                              type="message", duration=None)
@@ -871,7 +1122,9 @@ def server(input, output, session):
             return  # stops rescheduling once the task settles
         reactive.invalidate_later(0.3)
         done, total = _assess_prog["done"], _assess_prog["total"]
-        label = f"Computing metrics… {done}/{total}"
+        waiting = _assess_prog.get("waiting") or {}
+        detail = (" — waiting on " + ", ".join(sorted(waiting))) if waiting else ""
+        label = f"Computing metrics… {done}/{total}{detail}"
         stage.set(label)
         ui.notification_show(label + " — please wait", id="stage",
                              type="message", duration=None)
@@ -1258,8 +1511,9 @@ def server(input, output, session):
             with reactive.isolate():
                 picked = snapped_point() is not None
             body = ui.TagList(
-                ui.div("Zoom in until blue stream lines appear, then click a stream to "
-                       "place a point. Or search an address.", class_="easi-instr"),
+                ui.div("Zoom in until blue stream lines appear and click a stream to place "
+                       "a point. Or enter coordinates below, or search an address.",
+                       class_="easi-instr"),
                 ui.input_text("address", "Address, place, or stream",
                               placeholder="e.g. Atlanta, GA  ·  Utoy Creek"),
                 ui.input_action_button("find_address", "Find on map",
@@ -1267,8 +1521,8 @@ def server(input, output, session):
                 ui.div("Type to search — suggestions from OpenStreetMap / Photon.",
                        class_="easi-ac-credit"),
                 ui.hr(),
-                ui.input_numeric("lat", "Latitude", value=40.0962, min=24.0, max=50.0, step=0.0001),
-                ui.input_numeric("lon", "Longitude", value=-83.0203, min=-125.0, max=-66.0, step=0.0001),
+                ui.input_numeric("lat", "Latitude", value=None, min=24.0, max=50.0, step=0.0001),
+                ui.input_numeric("lon", "Longitude", value=None, min=-125.0, max=-66.0, step=0.0001),
                 ui.input_numeric("reach_ft", "Assessment reach (ft)", value=int(DEFAULT_REACH_FT),
                                  min=100, max=5280, step=100),
                 ui.output_ui("snap_status"),
@@ -1387,8 +1641,8 @@ def server(input, output, session):
     def snap_status():
         pt = snapped_point()
         if not pt:
-            return ui.p("No point yet — zoom in (≥14) and click a blue stream line.",
-                        class_="easi-snap-note")
+            return ui.p("No point yet — enter coordinates, search an address, or zoom in "
+                        "and click a blue stream line.", class_="easi-snap-note")
         return ui.p(f"✓ Snapped to stream ({pt[2]:.0f} ft away). Click “Delineate basin”.",
                     class_="easi-snap-note ok")
 
@@ -1461,28 +1715,7 @@ def server(input, output, session):
         sc = scored()
         if not sc:
             return None
-        eci, sub = sc["ecosystemConditionIndex"], sc["subIndices"]
-        return ui.TagList(
-            ui.p(f'{sc["computedCount"]}/{sc["totalCount"]} metrics computed · '
-                 f'{_confidence_summary(sc)}',
-                 style="font-size:12.5px;color:#556;margin:.2rem 0 .7rem;"),
-            _outcome_cards(sc),
-            ui.div(
-                _bar("Ecosystem Condition Index", eci, scoring.index_band_color(eci or 0)),
-                _bar("Physical", sub["physical"], scoring.index_band_color(sub["physical"])),
-                _bar("Chemical", sub["chemical"], scoring.index_band_color(sub["chemical"])),
-                _bar("Biological", sub["biological"], scoring.index_band_color(sub["biological"])),
-                class_="easi-cond-bars",
-            ),
-            ui.p("Index 0–1 — achievable range ≈0.20 (all functions Poor) to ≈0.87 "
-                 "(all Good); bar color marks the Poor / Fair / Good condition band.",
-                 class_="easi-scale-note"),
-        )
-
-    @render.ui
-    def m_outcomes():
-        sc = scored()
-        return _outcome_table(sc["outcomes"]) if sc else None
+        return _summary_plots(sc)
 
     @render.ui
     def m_metrics():
@@ -1491,7 +1724,8 @@ def server(input, output, session):
             return None
         with reactive.isolate():          # read notes without re-rendering on every keystroke
             notes = dict(_notes())
-        return _metric_table(sc["metricRows"], notes)
+        return _metric_table(sc["metricRows"], notes,
+                             outcomes=sc["outcomes"], eci=sc["ecosystemConditionIndex"])
 
     @render.ui
     def xsection():
@@ -1500,9 +1734,68 @@ def server(input, output, session):
             return None
         return ui.div(
             ui.tags.img(src=f"data:image/png;base64,{xs['png_b64']}"),
-            ui.p(xs.get("caption") or "", class_="easi-xsection-cap"),
             class_="easi-xsection",
         )
+
+    if _HAS_PLOTLY:
+        @render_widget
+        def xsection_plot():
+            """Interactive cross-section (Plotly): drag-box zoom, pan, hover, and
+            modebar/double-click reset. Built ONCE — the profile/stages/unit are read
+            under ``reactive.isolate`` so this render has no reactive dependencies and
+            never re-runs. Candidate switches, height edits, and unit toggles are applied
+            in place by ``_sync_xsection_plot`` below, so the widget never unmounts /
+            remounts (that DOM churn was the flicker). The PDF still uses the matplotlib
+            PNG from ``xs_render``."""
+            with reactive.isolate():
+                block = _xs_block()
+                if not block:
+                    return None
+                g = current_geometry()
+                unit = g["unit"] if g else "ft"
+                bankfull_stage = g["bankfull_stage"] if g else block.get("bankfull_stage")
+                floodplain_stage = g["floodplain_stage"] if g else block.get("floodplain_stage")
+            import plotly.graph_objects as go
+            from easi import xsplotly
+            fw = go.FigureWidget(xsplotly.figure(
+                block["stations"], block["elevs"], thalweg=block["thalweg"],
+                bankfull_stage=bankfull_stage, floodplain_stage=floodplain_stage,
+                unit=unit, source=block.get("dem_source")))
+            fw._config = {"displaylogo": False}   # hide the Plotly logo (config-only)
+            return fw
+
+        @reactive.effect
+        def _sync_xsection_plot():
+            """Update the live cross-section figure IN PLACE when the selected candidate,
+            edited heights, or unit change. Mutating the existing FigureWidget (rather than
+            returning a new one from the render) is what removes the flicker: no DOM
+            remount, and the trace count stays fixed (see ``xsplotly.figure``), so this is
+            a single batched restyle/relayout. ``xsection_plot.widget`` is reactive and
+            ``req()``-waits until the widget has first rendered, so ordering is safe."""
+            w = xsection_plot.widget      # reactive: req()-waits until the widget exists
+            block = _xs_block()
+            if w is None or not block:
+                return
+            g = current_geometry()
+            unit = g["unit"] if g else "ft"
+            bankfull_stage = g["bankfull_stage"] if g else block.get("bankfull_stage")
+            floodplain_stage = g["floodplain_stage"] if g else block.get("floodplain_stage")
+            from easi import xsplotly
+            src = xsplotly.figure(
+                block["stations"], block["elevs"], thalweg=block["thalweg"],
+                bankfull_stage=bankfull_stage, floodplain_stage=floodplain_stage, unit=unit,
+                source=block.get("dem_source"))
+            with w.batch_update():        # one atomic client update -> no flash
+                for wt, st in zip(w.data, src.data):
+                    wt.x, wt.y = st.x, st.y
+                    wt.fillcolor = st.fillcolor        # blue water vs. transparent (no bankfull)
+                    wt.hovertemplate = st.hovertemplate  # carries the unit in the bed-line hover
+                w.layout.shapes = tuple(s.to_plotly_json() for s in src.layout.shapes)
+                w.layout.annotations = tuple(a.to_plotly_json() for a in src.layout.annotations)
+                w.layout.xaxis.range = src.layout.xaxis.range
+                w.layout.yaxis.range = src.layout.yaxis.range
+                w.layout.xaxis.title.text = src.layout.xaxis.title.text
+                w.layout.yaxis.title.text = src.layout.yaxis.title.text
 
     @render.ui
     def xs_selector():
@@ -1541,12 +1834,38 @@ def server(input, output, session):
         def rt(x):
             return f"{x:.2f}" if x is not None else "n/a"
 
-        rows = [("Bankfull width", wd(bf_w)),
+        def ar(m2):  # cross-sectional area in the selected unit (ft² or m²)
+            if m2 is None:
+                return "n/a"
+            return f"{m2 * per_m * per_m:.1f} ft²" if unit == "ft" else f"{m2:.1f} m²"
+
+        # measured channel area at the current bankfull stage (updates when edited)
+        bf_stage = g["bankfull_stage"] if g else block.get("bankfull_stage")
+        bf_area = (geomorph.flow_area(block["stations"], block["elevs"], bf_stage)[0]
+                   if bf_stage is not None else None)
+
+        region = block.get("division") or "National curve"
+        bk_area = block.get("bankfull_area_m2")
+        area_edge = block.get("bankfull_area_edge_limited")
+        if bk_area is not None:
+            area_txt = ar(bk_area) + (" ‡" if area_edge else "")
+            area_val = ui.TagList(area_txt, " ",
+                                  _info(html_tip=_bieger_area_tip_html(region)))
+        else:
+            area_val = "n/a"
+        rows = [("Bieger region", region),
+                ("Bieger XS area", area_val),
+                ("Bankfull width", wd(bf_w)),
+                ("Bankfull XS area", ar(bf_area)),
                 ("Floodprone width", wd(fp_w) + (" †" if edge else "")),
                 ("Entrenchment ratio", rt(er)),
                 ("Bank-height ratio", rt(bhr))]
         body = [ui.tags.tr(ui.tags.th(lbl), ui.tags.td(val)) for lbl, val in rows]
         out = [ui.tags.table(ui.tags.tbody(*body), class_="easi-tbl easi-xs-tbl")]
+        if area_edge:
+            out.append(ui.p("‡ the sampled DEM window is narrower than the regional "
+                            "bankfull area; the bankfull depth may be under-estimated.",
+                            class_="easi-xs-foot"))
         if edge:
             out.append(ui.p("† floodprone reached the sampled edge; width is "
                             "likely under-estimated.", class_="easi-xs-foot"))

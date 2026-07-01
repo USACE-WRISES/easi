@@ -55,13 +55,18 @@ def _query(layer: int, lat: float, lon: float, buffer_m: float, timeout: float) 
         return {}
 
 
-def impairment_at_point(lat: float, lon: float, timeout: float = 25.0) -> dict:
-    """Assessment unit whose NHDPlus catchment covers the point (exact), or {}."""
+def impairment_at_point(lat: float, lon: float, timeout: float = 8.0) -> dict:
+    """Assessment unit whose NHDPlus catchment covers the point (exact), or {}.
+
+    Short fail-fast ``timeout``: this is the first of a sequential chain (point ->
+    nearby -> modeled surrogate) in an interactive flow, so a stalled gispub service
+    should drop through to the fallback quickly instead of blocking the report.
+    """
     return _query(3, lat, lon, 0.0, timeout)
 
 
 def impairment_near_point(lat: float, lon: float, buffer_m: float = 2000.0,
-                          timeout: float = 25.0) -> dict:
+                          timeout: float = 8.0) -> dict:
     """Nearest assessed stream AU within ``buffer_m`` metres (impaired preferred), or {}.
 
     Keyless fallback for reaches not in an assessed catchment — buffers the point

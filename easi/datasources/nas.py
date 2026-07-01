@@ -14,11 +14,14 @@ _URL = "https://nas.er.usgs.gov/api/v2/occurrence/search"
 
 
 def established_taxa(huc12: str | None = None, huc8: str | None = None,
-                     timeout: float = 30.0) -> Optional[list[str]]:
+                     timeout: float = 10.0) -> Optional[list[str]]:
     """Sorted list of established nonindigenous scientific names.
 
     Returns [] for a genuine no-records result, and None on query failure (so
     the adapter can distinguish 'none present' from 'service unavailable').
+
+    Short fail-fast ``timeout`` (interactive screening flow): a slow NAS API should
+    mark the metric unavailable quickly rather than stall the report.
     """
     params = {"status": "established", "limit": "500"}
     if huc12:

@@ -34,10 +34,8 @@ def basin_characteristics(ctx) -> dict:
     # (Bankfull width/depth, entrenchment ratio, and bank-height ratio live in the
     # report's editable cross-section geometry table, not here.)
 
-    # climate normals (only shown when present in the StreamCat pull)
-    tair = sc.get("tmean8110ws")
-    if tair is not None:
-        rows.append(["Mean annual air temp", f"{tair:.1f} °C (PRISM 1981–2010)"])
+    # climate normals (only shown when present in the StreamCat pull). Mean annual air
+    # temp was dropped from the report as not needed for screening.
     elev = sc.get("elevws")
     if elev is not None:
         rows.append(["Mean basin elevation", f"{elev:.0f} m"])

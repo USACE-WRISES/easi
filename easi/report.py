@@ -11,7 +11,8 @@ import csv
 import io
 import json
 
-from .scoring import index_band_color, index_band_label
+from . import config
+from .scoring import function_score_band_color, index_band_color, index_band_label
 
 RATING_COLOR = {"Good": "#c8d9f2", "Fair": "#f5e7a6", "Poor": "#f5b5b5"}
 _DISCIPLINE_ORDER = ["Hydrology", "Hydraulics", "Geomorphology",
@@ -118,26 +119,80 @@ def build_geojson(result: dict) -> str:
 # --------------------------------------------------------------------------- #
 # PDF
 # --------------------------------------------------------------------------- #
-def _condition_png(rep: dict) -> bytes:
+def _summary_plots_png(rep: dict) -> bytes:
+    """Two-panel summary figure: all 20 function scores grouped by STAF category
+    (left, 0–15) and the condition indices with the Ecosystem index as parent of its
+    three sub-indices (right, 0–1). Every bar is colored by its Functioning /
+    Functioning-at-Risk / Non-Functioning band, matching the on-screen report."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    fscores = rep.get("functionScores") or {}
     sub = rep["subIndices"]
-    labels = ["Ecosystem", "Physical", "Chemical", "Biological"]
-    vals = [rep.get("ecosystemConditionIndex") or 0, sub["physical"],
-            sub["chemical"], sub["biological"]]
-    ylabels = [f"{lab} — {index_band_label(v)}" for lab, v in zip(labels, vals)]
-    colors = [index_band_color(v) for v in vals]
-    fig, ax = plt.subplots(figsize=(6.5, 1.9))
-    ax.barh(ylabels[::-1], vals[::-1], color=colors[::-1], edgecolor="#888")
-    ax.set_xlim(0, 1)
-    for i, v in enumerate(vals[::-1]):
-        ax.text(min(v + 0.02, 0.95), i, f"{v:.2f}", va="center", fontsize=9)
-    ax.set_xlabel("Condition index (0–1): Poor · Fair · Good bands")
-    fig.tight_layout()
+    eci = rep.get("ecosystemConditionIndex") or 0
+
+    # left panel: a header row per category, then its four function bars
+    rows = []  # (kind, label, value, color)
+    groups: dict[str, list] = {}
+    for fn in config.functions():
+        groups.setdefault(fn["category"], []).append(fn)
+    for cat, fns in groups.items():
+        rows.append(("hdr", cat, None, None))
+        for fn in fns:
+            s = fscores.get(fn["id"])
+            rows.append(("bar", fn["name"], (s if s is not None else 0),
+                         function_score_band_color(s if s is not None else 0)))
+
+    fig, (axL, axR) = plt.subplots(
+        1, 2, figsize=(7.2, 5.6), gridspec_kw={"width_ratios": [1.5, 1]})
+
+    plot_rows = rows[::-1]                      # ascending y → first category on top
+    labels, weights = [], []
+    for y, (kind, text, val, color) in enumerate(plot_rows):
+        if kind == "hdr":
+            labels.append(text); weights.append("bold")
+        else:
+            axL.barh(y, val, color=color, edgecolor="#888", height=0.66, zorder=3)
+            axL.text(min(val + 0.3, 14.4), y, f"{val:.0f}", va="center", fontsize=7)
+            labels.append("   " + text); weights.append("normal")
+    axL.set_yticks(range(len(plot_rows)))
+    axL.set_yticklabels(labels, fontsize=7.2)
+    for tick, w in zip(axL.get_yticklabels(), weights):
+        tick.set_fontweight(w)
+        if w == "bold":
+            tick.set_color("#22304d")
+    axL.set_ylim(-0.6, len(plot_rows) - 0.4)
+    axL.set_xlim(0, 15)
+    axL.set_xlabel("Function score (0–15)", fontsize=8)
+    axL.set_title("Function scores", fontsize=9.5, fontweight="bold")
+    axL.grid(axis="x", color="#eef0f4", lw=0.6)
+    axL.set_axisbelow(True)
+    for sp in ("top", "right"):
+        axL.spines[sp].set_visible(False)
+
+    # right panel: ECI parent on top, the three sub-indices indented beneath it
+    ci = [("Biological", sub["biological"]), ("Chemical", sub["chemical"]),
+          ("Physical", sub["physical"]), ("Ecosystem Condition Index", eci)]
+    for y, (lab, val) in enumerate(ci):
+        axR.barh(y, val, color=index_band_color(val), edgecolor="#888", height=0.6, zorder=3)
+        axR.text(min(val + 0.02, 0.92), y, f"{val:.2f}", va="center", fontsize=8)
+    axR.set_yticks(range(4))
+    axR.set_yticklabels(["   Biological", "   Chemical", "   Physical",
+                         "Ecosystem Condition Index"], fontsize=8)
+    axR.get_yticklabels()[3].set_fontweight("bold")
+    axR.set_ylim(-0.6, 3.6)
+    axR.set_xlim(0, 1)
+    axR.set_xlabel("Condition index (0–1)", fontsize=8)
+    axR.set_title("Condition indices", fontsize=9.5, fontweight="bold")
+    axR.grid(axis="x", color="#eef0f4", lw=0.6)
+    axR.set_axisbelow(True)
+    for sp in ("top", "right"):
+        axR.spines[sp].set_visible(False)
+
+    fig.tight_layout(w_pad=2.0)
     out = io.BytesIO()
-    fig.savefig(out, format="png", dpi=130)
+    fig.savefig(out, format="png", dpi=150)
     plt.close(fig)
     return out.getvalue()
 
@@ -155,14 +210,16 @@ def build_pdf(result: dict) -> bytes:
     story = []
     story.append(Paragraph(f"EASI Screening Report — {d.get('gnis_name','')}",
                            styles["Title"]))
-    meta = (f"COMID {d.get('comid')} · HUC12 {d.get('huc12') or '—'} · drainage "
-            f"{d.get('drainage_area_sqkm')} km² · watershed {d.get('watershed_area_sqkm')} km² · "
-            f"reach {d.get('reach_length_ft')} ft · "
-            f"{rep.get('computedCount')}/{rep.get('totalCount')} metrics computed")
+    lat, lon = d.get("snapped_lat"), d.get("snapped_lon")
+    pt = f"{lat:.4f}, {lon:.4f}" if lat is not None and lon is not None else "—"
+    meta = f"Analysis point {pt} · Reach {d.get('reach_length_ft')} ft upstream"
     story.append(Paragraph(meta, styles["Normal"]))
     story.append(Spacer(1, 8))
 
-    basin_rows = (rep.get("basin") or {}).get("rows") or []
+    # COMID/HUC12 moved out of the meta line into the basin table (the data exports still
+    # carry them separately); drainage area is already a basin row.
+    basin_rows = [["COMID", d.get("comid")], ["HUC12", d.get("huc12") or "—"]] + \
+        list((rep.get("basin") or {}).get("rows") or [])
     if basin_rows:
         story.append(Paragraph("Basin characteristics", styles["Heading4"]))
         btbl = Table([[Paragraph(f"<b>{lbl}</b>", styles["BodyText"]),
@@ -176,7 +233,11 @@ def build_pdf(result: dict) -> bytes:
         story.append(btbl)
         story.append(Spacer(1, 8))
 
-    story.append(Image(io.BytesIO(_condition_png(rep)), width=6.0 * inch, height=1.75 * inch))
+    story.append(Image(io.BytesIO(_summary_plots_png(rep)),
+                       width=7.0 * inch, height=5.44 * inch))
+    story.append(Paragraph(
+        "Bars colored by condition band — blue: Functioning · yellow: "
+        "Functioning-at-Risk · red: Non-Functioning.", styles["Italic"]))
     story.append(Spacer(1, 8))
 
     xs = rep.get("crossSection") or {}
@@ -185,8 +246,6 @@ def build_pdf(result: dict) -> bytes:
         story.append(Paragraph("Representative cross-section", styles["Heading4"]))
         story.append(Image(io.BytesIO(base64.b64decode(xs["png_b64"])),
                            width=6.0 * inch, height=2.4 * inch))
-        if xs.get("caption"):
-            story.append(Paragraph(xs["caption"], styles["Italic"]))
         geom = xs.get("geom") or {}
         thal = geom.get("thalweg")
         ft = 3.28084  # metres -> feet for the report
@@ -199,12 +258,15 @@ def build_pdf(result: dict) -> bytes:
                     if stage is not None and thal is not None else "n/a")
 
         er, bhr = xs.get("entrenchment_ratio"), xs.get("bank_height_ratio")
-        summary = (f"Bankfull width: {_w(geom.get('bankfull_width_m'))} &middot; "
-                   f"Floodprone width: {_w(geom.get('flood_prone_width_m'))} &middot; "
-                   f"Entrenchment ratio: {er if er is not None else 'n/a'} &middot; "
-                   f"Bank-height ratio: {bhr if bhr is not None else 'n/a'} &middot; "
-                   f"Bankfull height: {_h(geom.get('bankfull_stage'))} &middot; "
-                   f"Low bank height: {_h(geom.get('floodplain_stage'))}")
+        bka = geom.get("bankfull_area_m2")
+        summary = (f"Bieger region: {geom.get('division') or 'National curve'} &middot; "
+                   f"Bieger XS area: {bka:.1f} m² &middot; " if bka is not None else "")
+        summary += (f"Bankfull width: {_w(geom.get('bankfull_width_m'))} &middot; "
+                    f"Floodprone width: {_w(geom.get('flood_prone_width_m'))} &middot; "
+                    f"Entrenchment ratio: {er if er is not None else 'n/a'} &middot; "
+                    f"Bank-height ratio: {bhr if bhr is not None else 'n/a'} &middot; "
+                    f"Bankfull height: {_h(geom.get('bankfull_stage'))} &middot; "
+                    f"Low bank height: {_h(geom.get('floodplain_stage'))}")
         story.append(Paragraph(summary, styles["Normal"]))
         story.append(Spacer(1, 8))
 

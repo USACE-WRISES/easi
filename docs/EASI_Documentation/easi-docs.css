@@ -35,6 +35,24 @@ table { font-size: .9rem; }
 thead th { background: #eef2f8; color: var(--easi-accent-dark); }
 caption, .table caption { caption-side: top; font-weight: 600; color: var(--easi-accent-dark); }
 
+/* Metric tables (Hydrology through Biology): each metric is a four-row block
+   (Function, Definition, How EASI computes it, Scoring) with the bold metric name
+   on the first row. Markdown tables cannot merge that name cell across its rows, so
+   a heavier rule before each new block (rows 5, 9, 13) restores the grouped look of
+   the technical note. The metric name is pinned to the top of its block. */
+#tbl-metrics-hydrology tbody tr:nth-child(4n+1):not(:first-child) td,
+#tbl-metrics-hydraulics tbody tr:nth-child(4n+1):not(:first-child) td,
+#tbl-metrics-geomorphology tbody tr:nth-child(4n+1):not(:first-child) td,
+#tbl-metrics-physicochemistry tbody tr:nth-child(4n+1):not(:first-child) td,
+#tbl-metrics-biology tbody tr:nth-child(4n+1):not(:first-child) td {
+  border-top: 2px solid var(--easi-accent);
+}
+#tbl-metrics-hydrology tbody td:first-child,
+#tbl-metrics-hydraulics tbody td:first-child,
+#tbl-metrics-geomorphology tbody td:first-child,
+#tbl-metrics-physicochemistry tbody td:first-child,
+#tbl-metrics-biology tbody td:first-child { vertical-align: top; }
+
 /* inline condition pills (Good / Fair / Poor) */
 .pill { display: inline-block; padding: 1px 8px; border-radius: 10px;
   font-size: .8rem; font-weight: 600; color: #27313f; }

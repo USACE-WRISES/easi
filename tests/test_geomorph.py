@@ -264,3 +264,108 @@ def test_reach_summary_retains_profile_and_stages():
     assert "fp_stage_m" in rs
     # existing aggregates unchanged
     assert "entrenchment_ratio" in rs and "bank_height_ratio" in rs
+
+
+# --- area-at-stage + area-based bankfull (Bieger XS-area inversion) --------------- #
+def test_flow_area_v_channel_matches_analytic():
+    # symmetric V, thalweg 0 at x=50, side slope 0.5 -> area below stage h is 2*h^2
+    stations = list(range(0, 101))
+    elevs = [abs(x - 50) * 0.5 for x in stations]
+    a, edge = geomorph.flow_area(stations, elevs, 2.0)
+    assert a == pytest.approx(8.0, abs=0.01) and edge is False
+
+
+def test_flow_area_zero_at_or_below_thalweg():
+    stations = list(range(0, 11))
+    elevs = [abs(x - 5) * 0.5 for x in stations]
+    assert geomorph.flow_area(stations, elevs, 0.0) == (0.0, False)
+
+
+def test_flow_area_monotonic_in_stage():
+    stations = list(range(0, 101))
+    elevs = [abs(x - 50) * 0.5 for x in stations]
+    a1, _ = geomorph.flow_area(stations, elevs, 1.0)
+    a2, _ = geomorph.flow_area(stations, elevs, 2.0)
+    a3, _ = geomorph.flow_area(stations, elevs, 4.0)
+    assert 0 < a1 < a2 < a3
+
+
+def test_flow_area_excludes_disconnected_pocket():
+    # a low pocket walled off from the channel must not add wetted area (contiguous only)
+    stations = list(range(0, 101))
+    elevs = []
+    for x in stations:
+        if x == 20:
+            elevs.append(1.0)                      # disconnected pocket below the stage
+        elif 40 <= x <= 60:
+            elevs.append(abs(x - 50) * 0.3)        # channel V, thalweg 0 at x=50
+        else:
+            elevs.append(5.0)                      # high ground walls the pocket off
+    a, edge = geomorph.flow_area(stations, elevs, 3.0)
+    assert a == pytest.approx(30.0, abs=1.0) and edge is False   # channel only
+
+
+def test_stage_for_area_recovers_depth():
+    stations = list(range(0, 101))
+    elevs = [abs(x - 50) * 0.5 for x in stations]        # thalweg 0 -> 2*h^2 = 8 at h=2
+    stage, edge = geomorph.stage_for_area(stations, elevs, 8.0)
+    assert stage == pytest.approx(2.0, abs=0.02) and edge is False
+    a, _ = geomorph.flow_area(stations, elevs, stage)
+    assert a == pytest.approx(8.0, abs=0.05)
+
+
+def test_stage_for_area_edge_limited_when_target_exceeds_capacity():
+    stations = list(range(0, 11))
+    elevs = [abs(x - 5) * 0.1 for x in stations]         # max 0.5 -> capacity 2.5 m^2
+    stage, edge = geomorph.stage_for_area(stations, elevs, 5.0)
+    assert edge is True and stage == pytest.approx(max(elevs), abs=1e-6)
+
+
+def test_stage_for_area_nonpositive_target_returns_thalweg():
+    stations = list(range(0, 11))
+    elevs = [abs(x - 5) * 0.5 for x in stations]
+    stage, edge = geomorph.stage_for_area(stations, elevs, 0.0)
+    assert stage == pytest.approx(0.0) and edge is False
+
+
+def test_summarize_profile_area_sets_bankfull_stage():
+    # a target XS area of 8 m^2 gives bankfull depth ~2 m on the V (thalweg 0),
+    # overriding the injected Bieger depth (1.5) that the fallback would use.
+    stations = list(range(0, 101))
+    elevs = [abs(x - 50) * 0.5 for x in stations]
+    s = geomorph.summarize_profile(stations, elevs, 50.0, bankfull=(12.0, 1.5),
+                                   bankfull_area_m2=8.0, division="Interior Plains")
+    assert s["bankfull_area_m2"] == 8.0
+    assert s["bankfull_area_edge_limited"] is False
+    assert s["bankfull_depth_m"] == pytest.approx(2.0, abs=0.05)   # area-derived, not 1.5
+
+
+# --- profile simplification (ported from xs-calc) -------------------------- #
+def test_simplify_profile_drops_collinear_run():
+    st = [float(s) for s in range(0, 101)]
+    el = [2.0 * s for s in st]                     # perfectly linear -> interior all collinear
+    s2, e2 = geomorph.simplify_profile(st, el)
+    assert (s2[0], s2[-1]) == (0.0, 100.0)          # endpoints preserved
+    assert len(s2) <= 3                             # collinear interior removed
+
+
+def test_simplify_profile_keeps_thalweg_vertex():
+    st = [float(s) for s in range(-50, 51)]
+    el = [abs(s) * 0.1 for s in st]                 # V-notch, thalweg at station 0
+    s2, e2 = geomorph.simplify_profile(st, el)
+    assert 0.0 in s2                                # thalweg vertex kept
+    assert (s2[0], s2[-1]) == (-50.0, 50.0)
+    assert len(s2) <= 5                             # straight arms collapse to few points
+
+
+def test_simplify_profile_caps_at_max_points():
+    st = [float(s) for s in range(0, 400)]
+    el = [float(s % 2) for s in st]                 # zigzag: nothing is collinear
+    s2, e2 = geomorph.simplify_profile(st, el, max_points=50)
+    assert len(s2) == 50                            # Visvalingam trims to the cap
+    assert (s2[0], s2[-1]) == (0.0, 399.0)          # endpoints kept
+
+
+def test_simplify_profile_short_unchanged():
+    st, el = [0.0, 1.0, 2.0], [1.0, 0.0, 1.0]
+    assert geomorph.simplify_profile(st, el) == (st, el)

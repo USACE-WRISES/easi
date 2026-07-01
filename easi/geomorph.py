@@ -99,6 +99,85 @@ def flow_width(stations: list[float], elevs: list[float], stage: float,
     return max(right - left, 0.0), (l_edge or r_edge)
 
 
+def flow_area(stations: list[float], elevs: list[float], stage: float,
+              *, thalweg_index: Optional[int] = None) -> tuple[float, bool]:
+    """Contiguous channel wetted cross-sectional area (m^2) below ``stage``.
+
+    The companion to :func:`flow_width`: bound the single water body spanning the
+    thalweg (walk outward each way to the first bank that rises to/above ``stage``,
+    interpolating the crossing) and integrate depth ``stage - z`` across that span
+    with the trapezoidal rule. Every node between the banks is below the stage (the
+    walk stops at the first that isn't), so the integrand is non-negative. Returns
+    ``(area_m2, edge_limited)``; area is 0 when ``stage`` is at or below the thalweg,
+    and ``edge_limited`` is True when a bank is not reached within the sampled
+    profile (DEM buffer too small).
+    """
+    n = len(stations)
+    if n < 2:
+        return 0.0, False
+    ti = thalweg_index if thalweg_index is not None else min(range(n), key=lambda i: elevs[i])
+    if elevs[ti] >= stage:
+        return 0.0, False
+
+    def edge(direction: int) -> tuple[int, float, bool]:
+        # (last node inside the channel, interpolated bank station, edge_limited)
+        i = ti
+        while 0 <= i + direction < n:
+            j = i + direction
+            if elevs[j] >= stage:  # crossing between i (below) and j (>= stage)
+                t = (stage - elevs[i]) / (elevs[j] - elevs[i])
+                return i, stations[i] + t * (stations[j] - stations[i]), False
+            i = j
+        return i, stations[i], True  # reached the profile end without rising to stage
+
+    li, left, l_edge = edge(-1)
+    ri, right, r_edge = edge(+1)
+    # (x, depth) polyline from the left bank (depth 0) across the inside nodes to
+    # the right bank (depth 0); a truncated side coincides with its edge node, so
+    # its zero-width segment adds nothing and the node's real depth is kept.
+    xs_pts = [left] + [stations[k] for k in range(li, ri + 1)] + [right]
+    depths = [0.0] + [max(stage - elevs[k], 0.0) for k in range(li, ri + 1)] + [0.0]
+    area = 0.0
+    for k in range(len(xs_pts) - 1):
+        dx = xs_pts[k + 1] - xs_pts[k]
+        if dx > 0:
+            area += 0.5 * (depths[k] + depths[k + 1]) * dx
+    return max(area, 0.0), (l_edge or r_edge)
+
+
+def stage_for_area(stations: list[float], elevs: list[float], target_area: float,
+                   *, thalweg_index: Optional[int] = None,
+                   iters: int = 48) -> tuple[float, bool]:
+    """Water-surface stage whose contiguous channel area equals ``target_area`` (m^2).
+
+    Bisection — :func:`flow_area` increases monotonically with stage. Returns
+    ``(stage, edge_limited)``. If the sampled profile cannot hold the target area even
+    at its highest point, returns that top stage with ``edge_limited=True``; a
+    non-positive target returns the thalweg elevation.
+    """
+    n = len(elevs)
+    if n < 2:
+        return (elevs[0] if elevs else 0.0), False
+    ti = thalweg_index if thalweg_index is not None else min(range(n), key=lambda i: elevs[i])
+    lo = elevs[ti]
+    if target_area is None or target_area <= 0:
+        return lo, False
+    hi = max(elevs)
+    if hi <= lo:
+        return lo, False
+    a_hi, _ = flow_area(stations, elevs, hi, thalweg_index=ti)
+    if a_hi < target_area:
+        return hi, True  # the sampled window cannot hold the regional area
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        a, _ = flow_area(stations, elevs, mid, thalweg_index=ti)
+        if a < target_area:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi), False
+
+
 def balanced_profile(stations: list[float], elevs: list[float], *,
                      min_half: float = 30.0
                      ) -> Optional[tuple[list[float], list[float]]]:
@@ -146,6 +225,81 @@ def balanced_profile(stations: list[float], elevs: list[float], *,
     if len(out_s) < 7:
         return None
     return out_s, out_e
+
+
+def simplify_profile(stations: list[float], elevs: list[float], *,
+                     tol_x: float = 0.15, tol_z: float = 0.03,
+                     col_tol: float = 0.03, min_slope: float = 0.001,
+                     max_points: int = 250) -> tuple[list[float], list[float]]:
+    """Thin a dense station/elevation profile (metres), ported from xs-calc's filters.
+
+    Fine (1 m) DEM sampling produces very dense transects; this drops redundant points
+    while preserving channel shape. Mirrors ``filter_logic.js`` in the xs-calc repo:
+      1. **near** — drop a point within (``tol_x``, ``tol_z``) of the previous kept point;
+      2. **collinear** — drop an interior point whose perpendicular distance to the line
+         through its neighbours is <= ``col_tol`` and whose slope barely changes
+         (<= ``min_slope``);
+      3. **Visvalingam trim** — if still over ``max_points``, repeatedly remove the point
+         forming the smallest triangle with its neighbours until the cap is met.
+    The first point, last point, and the thalweg (min-elevation point) are never removed.
+    """
+    n = len(stations)
+    if n != len(elevs) or n <= 3:
+        return list(stations), list(elevs)
+    thal = min(range(n), key=lambda i: elevs[i])
+    pts = [{"x": float(s), "z": float(e), "g": (i in (0, n - 1, thal))}
+           for i, (s, e) in enumerate(zip(stations, elevs))]
+
+    def slope(a, b):
+        dx = b["x"] - a["x"]
+        return float("inf") if dx == 0 else (b["z"] - a["z"]) / dx
+
+    def perp(p, a, b):  # perpendicular distance from p to the line a-b
+        dx, dz = b["x"] - a["x"], b["z"] - a["z"]
+        den = (dx * dx + dz * dz) ** 0.5
+        if den == 0:
+            return ((p["x"] - a["x"]) ** 2 + (p["z"] - a["z"]) ** 2) ** 0.5
+        return abs(dz * p["x"] - dx * p["z"] + b["x"] * a["z"] - b["z"] * a["x"]) / den
+
+    def tri(a, b, c):  # triangle area (shoelace)
+        return abs(a["x"] * (b["z"] - c["z"]) + b["x"] * (c["z"] - a["z"])
+                   + c["x"] * (a["z"] - b["z"])) / 2.0
+
+    kept = [pts[0]]                                   # 1) near filter
+    for b in pts[1:]:
+        a = kept[-1]
+        if (not b["g"]) and abs(b["x"] - a["x"]) <= tol_x and abs(b["z"] - a["z"]) <= tol_z:
+            continue
+        kept.append(b)
+    pts = kept
+
+    changed = True                                   # 2) collinear filter (until stable)
+    while changed:
+        changed = False
+        i = 1
+        while i < len(pts) - 1:
+            a, b, c = pts[i - 1], pts[i], pts[i + 1]
+            if not b["g"] and perp(b, a, c) <= col_tol:
+                ma, mc = slope(a, b), slope(a, c)
+                if (ma == float("inf") and mc == float("inf")) or abs(ma - mc) <= min_slope:
+                    del pts[i]
+                    changed = True
+                    continue
+            i += 1
+
+    while len(pts) > max_points:                     # 3) Visvalingam trim to the cap
+        best_i, best_area = None, float("inf")
+        for i in range(1, len(pts) - 1):
+            if pts[i]["g"]:
+                continue
+            area = tri(pts[i - 1], pts[i], pts[i + 1])
+            if area < best_area:
+                best_area, best_i = area, i
+        if best_i is None:
+            break
+        del pts[best_i]
+
+    return [p["x"] for p in pts], [p["z"] for p in pts]
 
 
 def transect_entrenchment(stations: list[float], elevs: list[float],
@@ -273,21 +427,36 @@ def derive_from_stages(stations: list[float], elevs: list[float], *,
 
 def summarize_profile(stations: list[float], elevs: list[float], da_sqkm: float, *,
                       bankfull: Optional[tuple[float, float]] = None,
+                      bankfull_area_m2: Optional[float] = None,
                       division: Optional[str] = None) -> dict:
     """Rosgen summary for one station-elevation profile at its default stages.
 
-    Bankfull depth from the regional curve (``bankfull`` (width, depth) or the
-    national ``bankfull_geometry``); bankfull stage = thalweg + depth; low-bank stage
-    = the lower top-of-bank, clamped to bankfull. ER/BHR/widths are measured on this
-    profile (the editable cross-section + metrics share these). Returns the profile
-    plus the keys the editable geometry block consumes.
+    Bankfull stage is the depth at which the channel cross-sectional area equals the
+    Bieger regional bankfull area (``bankfull_area_m2``, solved on this profile via
+    :func:`stage_for_area`); without that target it falls back to thalweg + the Bieger
+    regional depth (``bankfull`` (width, depth) or the national ``bankfull_geometry``).
+    Low-bank stage = the lower top-of-bank, clamped to bankfull. ER/BHR/widths are
+    measured on this profile (the editable cross-section + metrics share these).
+    Returns the profile plus the keys the editable geometry block consumes.
     """
     w_bf, d_bf = bankfull if bankfull is not None else bankfull_geometry(da_sqkm)
     thalweg = min(elevs)
+    ti = min(range(len(elevs)), key=lambda i: elevs[i]) if elevs else 0
+    area_edge = False
+    if bankfull_area_m2 is not None and bankfull_area_m2 > 0:
+        bankfull_stage, area_edge = stage_for_area(stations, elevs, bankfull_area_m2,
+                                                   thalweg_index=ti)
+        d_area = bankfull_stage - thalweg
+        if d_area > 0.01:            # area-derived bankfull depth
+            d_bf = d_area
+        else:                        # degenerate (flat/edge) -> regional-depth fallback
+            bankfull_stage = thalweg + d_bf
+    else:
+        bankfull_stage = thalweg + d_bf
     tob = top_of_bank_elev(stations, elevs)
-    low_bank_stage = max(tob if tob is not None else thalweg + d_bf, thalweg + d_bf)
+    low_bank_stage = max(tob if tob is not None else bankfull_stage, bankfull_stage)
     d = derive_from_stages(stations, elevs, thalweg=thalweg,
-                           bankfull_stage=thalweg + d_bf, floodplain_stage=low_bank_stage)
+                           bankfull_stage=bankfull_stage, floodplain_stage=low_bank_stage)
     out: dict = {"profile": {"stations": list(stations), "elevs": list(elevs)},
                  "thalweg": thalweg, "fp_stage_m": thalweg + 2.0 * d_bf,
                  "bankfull_width_m": d.get("bankfull_width_m") or round(w_bf, 1),
@@ -296,6 +465,9 @@ def summarize_profile(stations: list[float], elevs: list[float], da_sqkm: float,
                  "entrenchment_ratio": d.get("entrenchment_ratio"),
                  "bank_height_ratio": d.get("bank_height_ratio"),
                  "edge_limited": bool(d.get("edge_limited"))}
+    if bankfull_area_m2 is not None:
+        out["bankfull_area_m2"] = round(float(bankfull_area_m2), 2)
+        out["bankfull_area_edge_limited"] = bool(area_edge)
     if tob is not None:
         out["top_of_bank_m"] = tob
     if division:

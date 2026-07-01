@@ -115,7 +115,7 @@ def index_band_color(value: float) -> str:
 
 
 def index_band_label(value: float) -> str:
-    """Index (0-1) -> STAF condition category (Poor/Fair/Good), matching the color bands."""
+    """Index (0-1) -> STAF condition category (Non-Functioning/Functioning-at-Risk/Functioning), matching the color bands."""
     for (threshold, _color), label in zip(config.INDEX_BANDS, config.INDEX_BAND_LABELS):
         if value <= threshold:
             return label
@@ -127,6 +127,18 @@ def function_score_band_color(value: float) -> str:
         if value <= threshold:
             return color
     return config.FUNCTION_SCORE_BANDS[-1][1]
+
+
+def function_score_band_label(value: float) -> str:
+    """Function score (0-15) -> short condition code F / AR / NF (STAF bands).
+
+    Mirrors :func:`index_band_label` but returns the short badge form aligned with
+    ``config.FUNCTION_SCORE_BANDS`` (<=5 NF, <=10 AR, else F)."""
+    for (threshold, _color), label in zip(config.FUNCTION_SCORE_BANDS,
+                                          config.FUNCTION_SCORE_BAND_SHORT):
+        if value <= threshold:
+            return label
+    return config.FUNCTION_SCORE_BAND_SHORT[-1]
 
 
 # --------------------------------------------------------------------------- #

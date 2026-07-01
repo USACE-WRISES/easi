@@ -28,8 +28,11 @@ FUNCTION_SCORE_MAX = 15
 
 # Color bands (hex mirrors STAF). Index bands (0-1) and function-score bands (0-15).
 INDEX_BANDS = [(0.39, "#f5b5b5"), (0.69, "#f5e7a6"), (1.01, "#c8d9f2")]
-INDEX_BAND_LABELS = ("Poor", "Fair", "Good")  # condition category per band (aligned with INDEX_BANDS)
+INDEX_BAND_LABELS = ("Non-Functioning", "Functioning-at-Risk", "Functioning")  # condition category per band (aligned with INDEX_BANDS)
 FUNCTION_SCORE_BANDS = [(5, "#f5b5b5"), (10, "#f5e7a6"), (FUNCTION_SCORE_MAX, "#c8d9f2")]
+# Short F/AR/NF condition codes per function-score band (aligned with FUNCTION_SCORE_BANDS);
+# used for the optional badge next to a function score (STAF "Show F/AR/NF labels").
+FUNCTION_SCORE_BAND_SHORT = ("NF", "AR", "F")
 
 # Data-confidence levels for the report badges
 CONFIDENCE = ("H", "M", "M/L", "L")
@@ -212,6 +215,35 @@ METRIC_DEFINITIONS: dict[str, str] = {
     "watershed-connectivity-fish-passage-and-barrier-effects-longitudinal-connectivity":
         "Whether dams or barriers disrupt upstream–downstream movement of fish and aquatic "
         "organisms.",
+}
+
+# Short note on how each metric's value is computed, shown in the report ⓘ tooltip's
+# Calculation section (the data Source is shown separately). Most screening metrics bin a
+# dataset value directly, so only metrics with an extra computation or a composite/derived
+# input are listed here; the rest fall back to the "used directly" default in the app.
+METRIC_CALCULATIONS: dict[str, str] = {
+    "reach-inflow-concentrated-runoff-stormwater-inputs":
+        "From road–stream crossing and stormwater-outfall density along the reach.",
+    "streamflow-regime-flow-alteration-regulation-water-use":
+        "From upstream dam, diversion, and water-use indicators.",
+    "low-flow-and-baseflow-dynamics-low-flow-wetted-connectivity":
+        "From modeled flow permanence (low-flow wetted connectivity).",
+    "high-flow-dynamics-floodplain-engagement-frequency-bankfull-recurrence":
+        "From the bank-height ratio and the modeled bankfull-flow recurrence interval.",
+    "floodplain-connectivity-floodplain-access-entrenchment":
+        "Entrenchment ratio = flood-prone width ÷ bankfull width.",
+    "hyporheic-connectivity-hyporheic-exchange-indicators":
+        "Derived from channel slope and sinuosity.",
+    "channel-evolution-channel-evolution-stage-and-trends":
+        "From the bank-height ratio (low-bank height ÷ bankfull height).",
+    "channel-and-floodplain-dynamics-bank-erosion-and-armoring-condition":
+        "Composite of stream power, soil erodibility, and riparian condition.",
+    "sediment-continuity-sediment-supply-potential-watershed-banks":
+        "Composite of watershed- and channel-bank sediment-supply potential.",
+    "water-and-soil-quality-regulatory-impairment-status-305b-303d-tmdl":
+        "From the reach's Clean Water Act impaired-waters listing (303(d)/305(b)/TMDL).",
+    "watershed-connectivity-fish-passage-and-barrier-effects-longitudinal-connectivity":
+        "From dam/barrier presence affecting upstream–downstream passage.",
 }
 
 

@@ -104,7 +104,8 @@ def floodplain_access(ctx: AnalysisContext) -> MetricResult:
         return unavailable(ENTRENCHMENT_ID, "3DEP entrenchment unavailable for reach", "M")
     rating = rate_entrenchment(er)
     edge = bool(g.get("edge_limited"))
-    note = ("DEM 10 m; bankfull from national curve; override via xs-calc"
+    res = g.get("dem_resolution_m") or 10
+    note = (f"DEM {res} m; bankfull from national curve; override via xs-calc"
             + (" — floodprone reached buffer edge (ER likely under-estimated)"
                if edge else ""))
     return MetricResult(ENTRENCHMENT_ID, value=er,

@@ -36,6 +36,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 from easi import config  # noqa: E402
+from easi import scoring  # noqa: E402
 import sfari_data  # noqa: E402
 
 DOC = os.path.join(ROOT, "docs", "EASI_Documentation")
@@ -64,6 +65,13 @@ PHOTOS = {  # source filename in docs/Verification Sites -> figures/ name
     "Cowart Creek Upstream.jpg": "photo_cowart_up.jpg",
     "Mary's Creek Upstream 1.jpg": "photo_marys_up.jpg",
 }
+
+# Example report summaries for the Technical Note: a high-condition stream and a
+# low-condition stream, one PNG each (site id, display name, output file).
+EXAMPLE_REPORTS = [
+    ("MB", "Mink Brook", "example_high.png"),
+    ("CC", "Cowart Creek", "example_low.png"),
+]
 
 
 def cls(v):
@@ -209,6 +217,39 @@ def fig_function_agreement(sites):
     return rows
 
 
+def fig_example_reports():
+    """Two example report summaries for the Technical Note Figure 1 and Figure 2:
+    a high-condition stream (Mink Brook) and a low-condition stream (Cowart Creek).
+
+    Reads the cached EASI report directly from the per-site JSON (no SFARI xlsx
+    needed) and renders one horizontal-bar panel per stream, mirroring the app's
+    report summary. Bars are colored by the same condition bands as the live app
+    via scoring.index_band_color, so the figure matches what a user sees.
+    """
+    labels = ["Ecosystem", "Physical", "Chemical", "Biological"]
+    for sid, name, outfile in EXAMPLE_REPORTS:
+        with open(os.path.join(REPDIR, f"{sid}.json"), encoding="utf-8") as f:
+            rep = json.load(f)["report"]
+        sub = rep["subIndices"]
+        vals = [rep["ecosystemConditionIndex"],
+                sub["physical"], sub["chemical"], sub["biological"]]
+        colors = [scoring.index_band_color(v) for v in vals]
+        fig, ax = plt.subplots(figsize=(6.5, 1.9))
+        ax.barh(labels[::-1], vals[::-1], color=colors[::-1], edgecolor="#888")
+        ax.set_xlim(0, 1)
+        for i, v in enumerate(vals[::-1]):
+            ax.text(min(v + 0.02, 0.92), i, f"{v:.2f}", va="center", fontsize=9)
+        ax.set_title(f"{name} ({cls(vals[0])})", fontsize=11, color=ACCENT_DK)
+        ax.set_xlabel("Condition index (0 to 1)", fontsize=9)
+        ax.tick_params(labelsize=9)
+        ax.grid(True, axis="x", color=GRID, lw=0.6)
+        for s in ax.spines.values():
+            s.set_color("#c7cfdb")
+        fig.tight_layout()
+        fig.savefig(os.path.join(FIG, outfile), dpi=150)
+        plt.close(fig)
+
+
 def extract_cross_sections(recs):
     for sid in CASE_IDS:
         rec = recs.get(sid)
@@ -249,14 +290,16 @@ def w(path, text):
 def table_coverage(recs):
     order = sorted(recs.values(),
                    key=lambda r: (r["sfari"]["eci"] or 0), reverse=True)
-    lines = ["| Site | State | Drainage area (km^2) | EASI ECI | EASI class | "
-             "SFARI ECI | SFARI class | Note |",
-             "|---|:--:|--:|--:|:--:|--:|:--:|---|"]
+    lines = ["| Site | State | Lat | Lon | Drainage area (km^2) | EASI ECI | "
+             "EASI class | SFARI ECI | SFARI class | Note |",
+             "|---|:--:|--:|--:|--:|--:|:--:|--:|:--:|---|"]
     for r in order:
         s = r["site"]
         e = r.get("easi") or {}
         da = (r.get("delineation") or {}).get("drainage_area_sqkm")
         da_txt = f"{da:.1f}" if da is not None else "n/a"
+        lat = f"{s['lat']:.4f}" if s.get("lat") is not None else "n/a"
+        lon = f"{s['lon']:.4f}" if s.get("lon") is not None else "n/a"
         note = f"SFARI dup of {s['duplicate_of']}" if s["sfari_duplicate"] else ""
         st = r.get("status")
         if st != "ok":
@@ -264,7 +307,7 @@ def table_coverage(recs):
             note = (note + ", " if note else "") + extra
         eeci = e.get("eci")
         lines.append(
-            f"| {s['name']} | {s['state']} | "
+            f"| {s['name']} | {s['state']} | {lat} | {lon} | "
             f"{da_txt} | {eeci if eeci is not None else 'n/a'} | "
             f"{CLS_SHORT.get(cls(eeci), 'n/a')} | {r['sfari']['eci']:.2f} | "
             f"{CLS_SHORT.get(cls(r['sfari']['eci']), 'n/a')} | {note} |")
@@ -384,6 +427,7 @@ def main():
     eci_stats = fig_eci(sites)
     sub_stats = fig_subindex(sites)
     fig_function_agreement(sites)
+    fig_example_reports()
     extract_cross_sections(recs)
     copy_photos()
 

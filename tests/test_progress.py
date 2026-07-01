@@ -41,3 +41,28 @@ def test_progress_respects_selection(monkeypatch):
     prog: dict = {}
     asyncio.run(assessment.assess(ctx, metric_ids=["fn0", "fn1"], progress=prog))
     assert prog["total"] == 2 and prog["done"] == 2   # only the selected adapters counted
+
+
+def test_external_service_map_covers_external_metrics():
+    # Keeps the "waiting on <service>" progress hint in sync with the metrics that
+    # actually make a live external call.
+    from easi.metrics import biology, physicochemistry, registry
+    assert registry.EXTERNAL_SERVICE == {
+        physicochemistry.IMPAIRMENT_ID: "EPA ATTAINS",
+        physicochemistry.NUTRIENTS_ID: "Water Quality Portal",
+        physicochemistry.TEMPERATURE_ID: "Water Quality Portal",
+        biology.INVASIVES_ID: "USGS NAS",
+        biology.BARRIERS_ID: "USACE NID",
+    }
+
+
+def test_progress_waiting_populates_and_clears(monkeypatch):
+    # Map a fake metric to a service; assess() must init progress["waiting"], mark it
+    # in-flight, and clear it on completion (net-zero add/remove -> empty at the end).
+    _stub_offline(monkeypatch)
+    monkeypatch.setattr(assessment.registry, "REGISTRY", _fake_registry(2))
+    monkeypatch.setattr(assessment.registry, "EXTERNAL_SERVICE", {"fn0": "Test Service"})
+    ctx = AnalysisContext(lat=40.0, lon=-83.0, comid=1, drainage_area_sqkm=50.0)
+    prog: dict = {}
+    asyncio.run(assessment.assess(ctx, progress=prog))
+    assert prog["waiting"] == {}       # every in-flight service was cleared on completion

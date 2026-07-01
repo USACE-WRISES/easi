@@ -138,9 +138,9 @@ def test_index_band_color(value, expected):
 
 
 @pytest.mark.parametrize("value,expected", [
-    (0.10, "Poor"), (0.39, "Poor"), (0.20, "Poor"),
-    (0.40, "Fair"), (0.69, "Fair"), (0.53, "Fair"),
-    (0.70, "Good"), (0.87, "Good"), (1.0, "Good"),
+    (0.10, "Non-Functioning"), (0.39, "Non-Functioning"), (0.20, "Non-Functioning"),
+    (0.40, "Functioning-at-Risk"), (0.69, "Functioning-at-Risk"), (0.53, "Functioning-at-Risk"),
+    (0.70, "Functioning"), (0.87, "Functioning"), (1.0, "Functioning"),
 ])
 def test_index_band_label(value, expected):
     assert scoring.index_band_label(value) == expected
@@ -153,6 +153,15 @@ def test_index_band_label(value, expected):
 ])
 def test_function_score_band_color(value, expected):
     assert scoring.function_score_band_color(value) == expected
+
+
+@pytest.mark.parametrize("value,expected", [
+    (0, "NF"), (5, "NF"),        # 0-5 Non-Functioning
+    (6, "AR"), (10, "AR"),       # 6-10 At-Risk (boundary 5/6 and 10/11)
+    (11, "F"), (15, "F"),        # 11-15 Functioning
+])
+def test_function_score_band_label(value, expected):
+    assert scoring.function_score_band_label(value) == expected
 
 
 # --- registry / data consistency ------------------------------------------ #

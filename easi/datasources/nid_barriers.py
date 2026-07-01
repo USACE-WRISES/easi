@@ -16,8 +16,12 @@ MILE_DEG = 1.0 / 69.0  # ~degrees per mile (lat); good enough for a screening bu
 
 
 def barriers_near(lat: float, lon: float, miles: float = 1.0,
-                  timeout: float = 30.0) -> Optional[list[dict]]:
-    """Return list of nearby dams [{name, storage, height}] or None on failure."""
+                  timeout: float = 10.0) -> Optional[list[dict]]:
+    """Return list of nearby dams [{name, storage, height}] or None on failure.
+
+    Short fail-fast ``timeout`` (interactive screening flow): a slow NID FeatureServer
+    should mark the metric unavailable quickly rather than stall the report.
+    """
     dx = MILE_DEG * miles
     params = {
         "geometry": f"{lon-dx},{lat-dx},{lon+dx},{lat+dx}",
